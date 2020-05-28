@@ -1,0 +1,22 @@
+#!/bin/bash
+
+FILE_ORIGINAL=$1
+FILENAME=$2
+FFMPEG_ARGS="-y -filter_complex fps=15,scale=800:-1:flags=lanczos[x];[x][1:v]paletteuse"
+PALETTE="${FILE_ORIGINAL%.*}_palette.png"
+
+if [ -z "$FILE_ORIGINAL" ]
+then
+	echo "You need to pass a video file as the first arg"
+	exit 1
+else
+	ffmpeg -i "$FILE_ORIGINAL" -vf fps=15,scale=800:-1:flags=lanczos,palettegen "${PALETTE}"
+	if [ -z "$FILENAME" ]
+	then
+		ffmpeg -i "$FILE_ORIGINAL" -i "${PALETTE}" $FFMPEG_ARGS "${FILE_ORIGINAL%.*}.gif"
+		rm "${FILE_ORIGINAL%.*}.png"
+	else
+		ffmpeg -i "$FILE_ORIGINAL" -i "${PALETTE}" $FFMPEG_ARGS "${FILE_ORIGINAL%/*.*}/${FILENAME%.*}.gif"
+	fi
+	rm "${PALETTE}"
+fi
