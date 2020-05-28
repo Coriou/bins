@@ -1,0 +1,17 @@
+#!/bin/bash
+
+FILE_ORIGINAL=$1
+FILENAME=$2
+
+if [ -z "$FILE_ORIGINAL" ]
+then
+	echo "You need to pass a video file as the first arg"
+	exit 1
+else
+	if [ -z "$FILENAME" ]
+	then
+		ffmpeg -i "$FILE_ORIGINAL" "${FILE_ORIGINAL%.*}.mp4"
+	else
+		ffmpeg -i "$FILE_ORIGINAL" "${FILE_ORIGINAL%/*.*}/${FILENAME%.*}.mp4"
+	fi
+fi
