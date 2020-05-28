@@ -2,6 +2,7 @@
 
 FILE_ORIGINAL=$1
 FILENAME=$2
+FFMPEG_ARGS="-vcodec h264 -acodec aac -strict -2 -crf 18 -preset slow"
 
 if [ -z "$FILE_ORIGINAL" ]
 then
@@ -10,8 +11,8 @@ then
 else
 	if [ -z "$FILENAME" ]
 	then
-		ffmpeg -i "$FILE_ORIGINAL" "${FILE_ORIGINAL%.*}.mp4"
+		ffmpeg -i "$FILE_ORIGINAL" $FFMPEG_ARGS "${FILE_ORIGINAL%.*}.mp4"
 	else
-		ffmpeg -i "$FILE_ORIGINAL" "${FILE_ORIGINAL%/*.*}/${FILENAME%.*}.mp4"
+		ffmpeg -i "$FILE_ORIGINAL" $FFMPEG_ARGS "${FILE_ORIGINAL%/*.*}/${FILENAME%.*}.mp4"
 	fi
 fi
