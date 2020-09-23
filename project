@@ -1,0 +1,148 @@
+#!/bin/bash
+
+PROJECTS_PATH="${HOME}/Projects/"
+WEB=false
+
+while test $# -gt 0; do
+  case "$1" in
+    -h|--help)
+      echo "$package - attempt to capture frames"
+      echo " "
+      echo "$package [options] application [arguments]"
+      echo " "
+      echo "options:"
+      echo "-h, --help                show brief help"
+      echo "-a, --action=ACTION       specify an action to use"
+      echo "-o, --output-dir=DIR      specify a directory to store output in"
+      exit 0
+      ;;
+    -w|--web)
+      shift
+      WEB=true
+      break
+      ;;
+      *)
+      break
+      ;;
+  esac
+done
+
+slugName() {
+    PROJECT_NAME=$(echo "$@" | iconv -t ascii//TRANSLIT | sed -E 's/[~\^]+//g' | sed -E 's/[^a-zA-Z0-9]+/-/g' | sed -E 's/^-+\|-+$//g' | tr A-Z a-z)
+    PROJECT_PATH="${PROJECTS_PATH}${PROJECT_NAME}"
+}
+
+slugName $1
+
+[ -d "${PROJECT_PATH}" ] && echo "There's already something at ${PROJECT_PATH}, please create a project with a different name" && exit 1
+
+mkdir -p "${PROJECT_PATH}"
+
+[ -d "${PROJECT_PATH}" ] && echo "Created a new directory at ${PROJECT_PATH}"
+[ ! -d "${PROJECT_PATH}" ] && echo "Could not create ${PROJECT_PATH}" && exit 1
+
+cd "${PROJECT_PATH}"
+
+cat > .prettierrc << EOF
+{
+  "useTabs": true,
+  "semi": false,
+  "arrowParens": "avoid"
+}
+EOF
+
+cat > .gitignore << EOF
+node_modules
+dist
+build
+.env
+.cache
+.log
+dump
+EOF
+
+cat > readme.md << EOF
+# ${1}
+EOF
+
+node -v > .nvmrc
+
+[ ! -f "package.json" ] && npm init -y
+
+sleep 1.5
+
+if $WEB
+then
+  node -p "JSON.stringify(Object.assign({ ...require('./package.json') }, { version: '0.0.1', main: './src/index.js', scripts: { 'dev': 'parcel index.html', 'build': 'parcel build index.html' } }), null, 2);" > package_tmp.json
+else
+  node -p "JSON.stringify(Object.assign({ ...require('./package.json') }, { version: '0.0.1', main: './src/index.js', scripts: { 'dev': 'backpack', 'build': 'backpack build' } }), null, 2);" > package_tmp.json
+fi
+
+rm package.json
+mv package_tmp.json package.json
+
+if $WEB
+then
+  npm i -D parcel-bundler
+  npm i react react-dom
+else
+  npm i -D backpack-core prettier
+fi
+
+npx sort-package-json
+
+mkdir -p src
+touch src/index.js
+
+if $WEB
+then
+  cat > src/index.js << EOF
+import React from "react"
+import { render } from "react-dom"
+import App from "./app"
+import "./scss/index.scss"
+
+render(<App />, document.getElementById("app"))
+EOF
+
+  touch src/app.js
+  cat > src/app.js << EOF
+import React from "react"
+
+const App = () => {
+	return <h1>Hello World</h1>
+}
+
+export default App
+EOF
+
+mkdir -p src/scss
+touch src/scss/index.scss
+  cat > src/scss/index.scss << EOF
+html,
+body {
+	background-color: #fbfbfb;
+}
+EOF
+
+touch index.html
+cat > index.html << EOF
+<html>
+	<body>
+		<div id="app"></div>
+
+		<script src="./src/index.js"></script>
+	</body>
+</html>
+EOF
+
+
+
+fi
+
+git init
+
+code .
+open .
+
+# echo "Esperança do vôo do avião" | iconv -t ascii//TRANSLIT | sed -E 's/[~\^]+//g' | sed -E 's/[^a-zA-Z0-9]+/-/g' | sed -E 's/^-+\|-+$//g' | tr A-Z a-z
