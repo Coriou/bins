@@ -1,0 +1,64 @@
+#!/bin/bash
+
+PROJECT_PATH="${HOME}/Projects/_python/"
+
+slugName() {
+    PROJECT_NAME=$(echo "$@" | iconv -t ascii//TRANSLIT | sed -E 's/[~\^]+//g' | sed -E 's/[^a-zA-Z0-9]+/-/g' | sed -E 's/^-+\|-+$//g' | tr A-Z a-z)
+    # PROJECT_PATH="${PROJECTS_PATH}${PROJECT_NAME}"
+}
+
+slugName $1
+
+mkdir -p "${PROJECT_PATH}"
+
+cd "${PROJECT_PATH}"
+
+python3 -m venv "${PROJECT_NAME}"
+
+cd "${PROJECT_PATH}${PROJECT_NAME}"
+
+source "bin/activate"
+
+cat > "${PROJECT_NAME}.sublime-project" << EOF
+{
+	"build_systems":
+	[
+		{
+			"file_regex": "^[ ]*File \"(...*?)\", line ([0-9]*)",
+			"name": "Anaconda Python Builder",
+			"selector": "source.python",
+			"shell_cmd": "${PROJECT_PATH}${PROJECT_NAME}/bin/python -u \"\$file\""
+		}
+	],
+	"folders":
+	[
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"python_interpreter": "${PROJECT_PATH}${PROJECT_NAME}/bin/python"
+	}
+}
+EOF
+
+cat > "${PROJECT_NAME}.sublime-workspace" << EOF
+{
+	"build_system": "Anaconda Python Builder",
+	"menu_visible": true,
+	"project": "${PROJECT_NAME}.sublime-project",
+	"save_all_on_build": true,
+	"show_minimap": false
+}
+EOF
+
+touch main.py
+
+cat > readme.md << EOF
+# ${1}
+EOF
+
+git init
+
+subl . --project "${PROJECT_NAME}.sublime-project"
+open .
