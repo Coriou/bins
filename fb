@@ -1,0 +1,5 @@
+#!/bin/bash
+
+export JAVA_OPTS="-Xmx512m"
+
+filebot -script fn:amc --output "/Volumes/Videos/videos" --action move --conflict skip -non-strict --log-file "/Volumes/Videos/filebot/amc.log" --def artwork=y "$@"
