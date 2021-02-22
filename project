@@ -5,17 +5,6 @@ WEB=false
 
 while test $# -gt 0; do
   case "$1" in
-    -h|--help)
-      echo "$package - attempt to capture frames"
-      echo " "
-      echo "$package [options] application [arguments]"
-      echo " "
-      echo "options:"
-      echo "-h, --help                show brief help"
-      echo "-a, --action=ACTION       specify an action to use"
-      echo "-o, --output-dir=DIR      specify a directory to store output in"
-      exit 0
-      ;;
     -w|--web)
       shift
       WEB=true
