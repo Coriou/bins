@@ -44,7 +44,7 @@ cat > "${PROJECT_NAME}.sublime-project" << EOF
 			"file_regex": "^[ ]*File \"(...*?)\", line ([0-9]*)",
 			"name": "Anaconda Python Builder",
 			"selector": "source.python",
-			"shell_cmd": "${PROJECT_PATH}${PROJECT_NAME}/bin/python -u \"\$file\""
+			"shell_cmd": "${PROJECT_PATH}${PROJECT_NAME}/.${PROJECT_NAME}-env/bin/python -u \"\$file\""
 		}
 	],
 	"folders":
@@ -54,7 +54,7 @@ cat > "${PROJECT_NAME}.sublime-project" << EOF
 		}
 	],
 	"settings": {
-		"python_interpreter": "${PROJECT_PATH}${PROJECT_NAME}/bin/python"
+		"python_interpreter": "${PROJECT_PATH}${PROJECT_NAME}/.${PROJECT_NAME}-env/bin/python"
 	}
 }
 EOF
