@@ -1,6 +1,20 @@
 #!/bin/bash
 
 PROJECT_PATH="${HOME}/Projects/_python/"
+JUPYTER=false
+
+while test $# -gt 0; do
+  case "$1" in
+    -j|--jupyter)
+      shift
+      JUPYTER=true
+      break
+      ;;
+      *)
+      break
+      ;;
+  esac
+done
 
 slugName() {
     PROJECT_NAME=$(echo "$@" | iconv -t ascii//TRANSLIT | sed -E 's/[~\^]+//g' | sed -E 's/[^a-zA-Z0-9]+/-/g' | sed -E 's/^-+\|-+$//g' | tr A-Z a-z)
@@ -9,15 +23,18 @@ slugName() {
 
 slugName $1
 
-mkdir -p "${PROJECT_PATH}"
-
-cd "${PROJECT_PATH}"
-
-python3 -m venv "${PROJECT_NAME}"
+mkdir -p "${PROJECT_PATH}${PROJECT_NAME}"
 
 cd "${PROJECT_PATH}${PROJECT_NAME}"
 
-source "bin/activate"
+python3 -m venv ".${PROJECT_NAME}-env"
+
+source ".${PROJECT_NAME}-env/bin/activate"
+
+if $JUPYTER
+then
+	pip install jupyterlab
+fi
 
 cat > "${PROJECT_NAME}.sublime-project" << EOF
 {
@@ -56,6 +73,75 @@ touch main.py
 
 cat > readme.md << EOF
 # ${1}
+EOF
+
+cat > .gitignore << EOF
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.manifest
+*.spec
+pip-log.txt
+pip-delete-this-directory.txt
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+*.mo
+*.pot
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+instance/
+.webassets-cache
+.scrapy
+docs/_build/
+.pybuilder/
+target/
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+__pypackages__/
+celerybeat-schedule
+celerybeat.pid
+*.sage.py
+.*-env
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
 EOF
 
 git init
