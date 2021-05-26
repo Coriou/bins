@@ -72,10 +72,53 @@ mv package_tmp.json package.json
 
 if $WEB
 then
-  npm i -D parcel-bundler
+  npm i -D parcel-bundler prettier eslint eslint-plugin-react
   npm i react react-dom
 else
-  npm i -D backpack-core prettier
+  npm i -D backpack-core prettier eslint
+fi
+
+touch .eslintrc.json
+if $WEB
+then
+  cat > .eslintrc.json << EOF
+{
+	"env": {
+		"browser": true,
+		"es2021": true
+	},
+	"extends": ["eslint:recommended", "plugin:react/recommended"],
+	"parserOptions": {
+		"ecmaFeatures": {
+			"jsx": true
+		},
+		"ecmaVersion": 12,
+		"sourceType": "module"
+	},
+	"plugins": ["react"],
+	"rules": {
+		"react/react-in-jsx-scope": 0,
+		"react/prop-types": 0,
+		"react/jsx-filename-extension": [1, { "extensions": [".js", ".jsx"] }]
+	}
+}
+EOF
+else
+  cat > .eslintrc.json << EOF
+{
+    "env": {
+        "es2021": true,
+        "node": true
+    },
+    "extends": "eslint:recommended",
+    "parserOptions": {
+        "ecmaVersion": 12,
+        "sourceType": "module"
+    },
+    "rules": {
+    }
+}
+EOF
 fi
 
 npx sort-package-json
@@ -132,6 +175,6 @@ fi
 git init
 
 code .
-open .
+# open .
 
 # echo "Esperança do vôo do avião" | iconv -t ascii//TRANSLIT | sed -E 's/[~\^]+//g' | sed -E 's/[^a-zA-Z0-9]+/-/g' | sed -E 's/^-+\|-+$//g' | tr A-Z a-z
