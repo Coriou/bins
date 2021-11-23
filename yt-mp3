@@ -1,0 +1,6 @@
+#!/bin/bash
+
+# Downloads music from Youtube
+
+INPUT=$1
+yt-dlp --embed-thumbnail --embed-metadata --extract-audio --audio-quality 0 --audio-format m4a "$INPUT"
