@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/zsh
 
 export JAVA_OPTS="-Xmx512m"
 

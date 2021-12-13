@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/zsh
 
 FFMPEG_ARGS="-vcodec h264 -acodec aac -strict -2 -crf 18 -preset slow"
 H265=false

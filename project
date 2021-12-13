@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/zsh
 
 PROJECTS_PATH="${HOME}/Projects/"
 WEB=false

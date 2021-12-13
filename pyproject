@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/zsh
 
 PROJECT_PATH="${HOME}/Projects/_python/"
 JUPYTER=false
