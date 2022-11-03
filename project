@@ -48,6 +48,7 @@ build
 .cache
 .log
 dump
+.parcel-cache
 EOF
 
 cat > readme.md << EOF
@@ -64,8 +65,10 @@ if $WEB
 then
   node -p "JSON.stringify(Object.assign({ ...require('./package.json') }, { version: '0.0.1', main: './src/index.js', scripts: { 'dev': 'parcel index.html', 'build': 'parcel build index.html' } }), null, 2);" > package_tmp.json
 else
-  node -p "JSON.stringify(Object.assign({ ...require('./package.json') }, { version: '0.0.1', main: './src/index.js', scripts: { 'dev': 'backpack', 'build': 'backpack build' } }), null, 2);" > package_tmp.json
+  node -p "JSON.stringify(Object.assign({ ...require('./package.json') }, { version: '0.0.1', targets: {'default': {'context': 'node', 'engines': {'node': '>= 18'}}}, source: './src/index.js', scripts: { 'dev': 'concurrently-await --names watch,run \"parcel watch --target default --no-hmr await --includes built\" \"nodemon dist/index.js --delay 3\"', 'build': 'parcel build' } }), null, 2);" > package_tmp.json
 fi
+
+	
 
 rm package.json
 mv package_tmp.json package.json
@@ -75,7 +78,7 @@ then
   npm i -D parcel-bundler prettier eslint eslint-plugin-react
   npm i react react-dom
 else
-  npm i -D backpack-core prettier eslint
+  npm i -D parcel nodemon concurrently-await prettier eslint
 fi
 
 touch .eslintrc.json
