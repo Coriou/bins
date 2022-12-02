@@ -151,11 +151,12 @@ if $WEB
 then
   cat > src/index.js << EOF
 import React from "react"
-import { render } from "react-dom"
+import { createRoot } from "react-dom/client"
 import App from "./app"
 import "./scss/index.scss"
 
-render(<App />, document.getElementById("app"))
+const root = createRoot(document.getElementById("app"))
+root.render(<App />)
 EOF
 
   touch src/app.js
