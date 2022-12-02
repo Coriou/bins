@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Usage: jpg image.jpg 90
+# --> creates image_90.jpg in the same directory, 90 meaning 90% compression
+
+QUALITY=90
+FILE_ORIGINAL=$1
+QUALITY_REQUESTED=$2
+FFMPEG_ARGS="-q:v"
+EXTENSION="${FILE_ORIGINAL#*.}"
+
+if [ -z "$QUALITY_REQUESTED" ]
+then
+    QUALITY=$QUALITY
+else
+    QUALITY=$QUALITY_REQUESTED
+fi
+
+# IMAGE QUALITY RANGES FROM 1 TO 31 - THE LOWER THE BETTER - SWITCH TO %
+Q_MIN=1
+Q_MAX=31
+Q=$(bc <<< "scale=2; $Q_MAX - (($QUALITY / 100) * $Q_MAX)")
+if (( $(echo "$Q > $Q_MAX" |bc -l) ))
+then
+    Q=$Q_MAX
+fi
+if (( $(echo "$Q < $Q_MIN" |bc -l) ))
+then
+    Q=$Q_MIN
+fi
+
+ffmpeg -i "$FILE_ORIGINAL" $FFMPEG_ARGS $Q "${FILE_ORIGINAL%.*}_${QUALITY}.${EXTENSION}"
+
+# if [ -z "$QUALITY_REQUESTED" ]
+# then
+#     ffmpeg -i "$FILE_ORIGINAL" $FFMPEG_ARGS $QUALITY "${FILE_ORIGINAL%.*}_${QUALITY}.${EXTENSION}"
+# else
+#     ffmpeg -i "$FILE_ORIGINAL" $FFMPEG_ARGS $QUALITY_REQUESTED "${FILE_ORIGINAL%.*}_${QUALITY_REQUESTED}.${EXTENSION}"
+# fi
