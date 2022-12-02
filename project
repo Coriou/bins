@@ -75,7 +75,7 @@ mv package_tmp.json package.json
 
 if $WEB
 then
-  npm i -D parcel-bundler prettier eslint eslint-plugin-react
+  npm i -D parcel prettier eslint eslint-plugin-react
   npm i react react-dom
 else
   npm i -D parcel nodemon concurrently-await prettier eslint
@@ -185,7 +185,7 @@ cat > index.html << EOF
 	<body>
 		<div id="app"></div>
 
-		<script src="./src/index.js"></script>
+		<script src="./src/index.js" type="module"></script>
 	</body>
 </html>
 EOF
