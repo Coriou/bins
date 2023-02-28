@@ -65,7 +65,7 @@ if $WEB
 then
   node -p "JSON.stringify(Object.assign({ ...require('./package.json') }, { version: '0.0.1', main: './src/index.js', scripts: { 'dev': 'parcel index.html', 'build': 'parcel build index.html' } }), null, 2);" > package_tmp.json
 else
-  node -p "JSON.stringify(Object.assign({ ...require('./package.json') }, { version: '0.0.1', targets: {'default': {'context': 'node', 'engines': {'node': '>= 18'}}}, source: './src/index.js', scripts: { 'dev': 'concurrently-await --names watch,run \"parcel watch --target default --no-hmr await --includes built\" \"nodemon dist/index.js --delay 3\"', 'build': 'parcel build' } }), null, 2);" > package_tmp.json
+  node -p "JSON.stringify(Object.assign({ ...require('./package.json') }, { main: '', type: 'module', scripts: { 'dev': 'node --enable-source-maps --watch src/index.js', 'start': 'node src/index.js' }, author: '', license: 'ISC' }), null, 2);" > package_tmp.json
 fi
 
 	
@@ -78,7 +78,8 @@ then
   npm i -D parcel prettier eslint eslint-plugin-react
   npm i react react-dom
 else
-  npm i -D parcel nodemon concurrently-await prettier eslint
+  npm i -D eslint prettier
+  npm i dotenv
 fi
 
 touch .eslintrc.json
@@ -190,13 +191,23 @@ cat > index.html << EOF
 </html>
 EOF
 
+else
+touch src/bootstrap.js
+  cat > src/bootstrap.js << EOF
+import * as dotenv from "dotenv"
 
+dotenv.config()
+console.clear()
+EOF
+  cat > src/index.js << EOF
+import "./bootstrap.js"
+EOF
+  cat > .env << EOF
+SOME_KEY="SOME_VALUE"
+EOF
+mkdir -p src/utils
 
 fi
 
 git init
-
 code .
-# open .
-
-# echo "Esperança do vôo do avião" | iconv -t ascii//TRANSLIT | sed -E 's/[~\^]+//g' | sed -E 's/[^a-zA-Z0-9]+/-/g' | sed -E 's/^-+\|-+$//g' | tr A-Z a-z
