@@ -1,0 +1,8 @@
+#!/bin/bash
+
+# Usage: pdf file.pdf (name?)
+# --> extracts first page as name?.jpg in the same directory
+
+INPUT=$1
+
+pdftoppm -jpeg -singlefile "$INPUT" "${INPUT%.*}"
