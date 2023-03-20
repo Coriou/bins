@@ -1,8 +1,19 @@
 #!/bin/bash
 
-# Usage: pdf file.pdf (name?)
-# --> extracts first page as name?.jpg in the same directory
+# Usage: pdf file.pdf
+# --> extracts first page as file.jpg in the same directory
+# --> specify the page number as the second argument if you wish
 
 INPUT=$1
+PAGE=1
 
-pdftoppm -jpeg -singlefile "$INPUT" "${INPUT%.*}"
+re='^[0-9]+$'
+
+if [ -n "$2" ]
+then
+    if [[ $2 =~ $re ]] ; then
+        PAGE=$2
+    fi
+fi
+
+pdftoppm -jpeg -f "$PAGE" -l "$PAGE" -singlefile "$INPUT" "${INPUT%.*}"
