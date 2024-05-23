@@ -1,0 +1,5 @@
+#!/bin/bash
+
+INPUT=$1
+
+cat "$INPUT" | ttok -t 4000 | llm -m gpt-4-turbo -s "Explain this in the most concise and simple way"
