@@ -1,0 +1,201 @@
+#!/bin/bash
+
+# Default project path
+DEFAULT_PROJECTS_PATH="${HOME}/Projects/"
+
+# Function to create a slug from the project name
+slugName() {
+    PROJECT_NAME=$(echo "$@" | iconv -t ascii//TRANSLIT | sed -E 's/[~\^]+//g' | sed -E 's/[^a-zA-Z0-9]+/-/g' | sed -E 's/^-+\|-+$//g' | tr A-Z a-z)
+    PROJECT_PATH="${OUTPUT_PATH}${PROJECT_NAME}"
+}
+
+# Parse command line arguments
+while getopts ":o:" opt; do
+  case ${opt} in
+    o )
+      OUTPUT_PATH=$OPTARG
+      ;;
+    \? )
+      echo "Invalid option: $OPTARG" 1>&2
+      exit 1
+      ;;
+    : )
+      echo "Invalid option: $OPTARG requires an argument" 1>&2
+      exit 1
+      ;;
+  esac
+done
+shift $((OPTIND -1))
+
+# Set output path or use default
+OUTPUT_PATH=${OUTPUT_PATH:-$DEFAULT_PROJECTS_PATH}
+
+# Validate and slugify project name
+if [ -z "$1" ]; then
+  echo "Please provide a project name."
+  exit 1
+fi
+
+slugName $1
+
+# Check if project directory already exists
+if [ -d "${PROJECT_PATH}" ]; then
+  echo "There's already something at ${PROJECT_PATH}, please create a project with a different name."
+  exit 1
+fi
+
+# Create project directory
+mkdir -p "${PROJECT_PATH}"
+
+# Check if directory was created successfully
+if [ -d "${PROJECT_PATH}" ]; then
+  echo "Created a new directory at ${PROJECT_PATH}"
+else
+  echo "Could not create ${PROJECT_PATH}"
+  exit 1
+fi
+
+# Change to project directory
+cd "${PROJECT_PATH}"
+
+# Create configuration files
+cat > .prettierrc << EOF
+{
+  "useTabs": true,
+  "semi": false,
+  "arrowParens": "avoid"
+}
+EOF
+
+cat > .gitignore << EOF
+node_modules
+dist
+.env
+.cache
+.log
+EOF
+
+cat > readme.md << EOF
+# ${1}
+EOF
+
+# Initialize Node project
+node -v > .nvmrc
+[ ! -f "package.json" ] && npm init -y
+
+# Modify package.json
+node -p "JSON.stringify(Object.assign(require('./package.json'), {
+  main: '',
+  type: 'module',
+  scripts: {
+    'build-file': 'esbuild --bundle --outdir=dist --platform=node --format=esm --packages=external',
+    'start': 'npm run build-file ./src/index.ts && node ./dist/index.js',
+    'dev': 'concurrently --raw \"npm:dev:*\"',
+    'dev:build': 'npm run build-file -- --watch=forever ./src/index.ts',
+    'dev:run': 'node --watch \"./dist/index.js\"'
+  },
+  author: '',
+  license: 'ISC'
+}), null, 2);" > package_tmp.json
+
+mkdir -p src src/utils
+
+# Replace package.json with modified version
+rm package.json
+mv package_tmp.json package.json
+
+# Install dependencies
+npm i -D esbuild eslint concurrently prettier @tsconfig/node20 @types/node
+npm i dotenv
+
+# Create ESLint configuration
+touch .eslintrc.json
+cat > .eslintrc.cjs << EOF
+module.exports = {
+  env: {
+    browser: true,
+    es2021: true,
+  },
+  extends: [
+    "eslint:recommended",
+    "plugin:@typescript-eslint/eslint-recommended",
+    "plugin:@typescript-eslint/recommended",
+  ],
+  parser: "@typescript-eslint/parser",
+  parserOptions: {
+    ecmaVersion: 12,
+    sourceType: "module",
+  },
+  plugins: ["@typescript-eslint"],
+  rules: {
+    "no-mixed-spaces-and-tabs": "off",
+    "no-unused-vars": "off",
+    "@typescript-eslint/no-unused-vars": [
+      "warn",
+      {
+        argsIgnorePattern: "^_",
+        varsIgnorePattern: "^_",
+        caughtErrorsIgnorePattern: "^_",
+      },
+    ],
+    "@typescript-eslint/no-explicit-any": ["warn"],
+    "no-async-promise-executor": ["warn"],
+  },
+  ignorePatterns: ["dist/**", ".eslintrc.cjs"],
+}
+EOF
+
+# Create TypeScript configuration
+touch tsconfig.json
+cat > tsconfig.json << EOF
+{
+  "extends": "@tsconfig/node20/tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2023"],
+    "module": "node16",
+    "target": "es2022",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "moduleResolution": "node16",
+    "resolveJsonModule": true,
+    "paths": {
+      "@/*": ["./*"]
+    }
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}
+EOF
+
+# Create initial TypeScript files
+touch types.d.ts
+touch src/bootstrap.ts
+cat > src/bootstrap.ts << EOF
+import 'dotenv/config'
+EOF
+
+touch src/index.ts
+cat > src/index.ts << EOF
+import "./bootstrap"
+
+console.log("Yo !")
+EOF
+
+# Create .env file
+touch .env
+cat > .env << EOF
+SOME_KEY="SOME_VALUE"
+EOF
+
+# Sort package.json
+npx sort-package-json
+
+# Run the build script once to init
+npm run build-file ./src/index.ts
+
+# Initialize Git repository
+git init
+
+# Open the project in Visual Studio Code
+code .
