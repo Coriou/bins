@@ -71,7 +71,6 @@ fi
 # 5. Create the Next.js App
 ########################################
 cd "$PROJECTS_PATH"
-echo "Creating Next.js project in: $PROJECT_PATH"
 
 npx --yes create-next-app@latest \
   --ts \
