@@ -1,10 +1,98 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-INPUT=$1
-PROJECTS_PATH="${HOME}/Projects/"
+# create-next.sh
+# 
+# Description:
+#   Automate the creation of a Next.js project using create-next-app, then set it
+#   up with shadcn UI. Uses a slug-ified version of the provided project name.
+#
+# Usage:
+#   ./create-next.sh "My Cool Project"
+#
+# Requirements:
+#   - bash
+#   - npx (Node.js + npm)
+#   - iconv (commonly available on macOS and Linux)
+#
+# Note: This script assumes you have a directory "$HOME/Projects" where you keep your code.
+#
 
+set -euo pipefail
+
+PROJECTS_PATH="$HOME/Projects"
+
+########################################
+# 1. Input Validation
+########################################
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <project_name>"
+  exit 1
+fi
+
+########################################
+# 2. Slugify Helper
+#
+#    Takes the raw project name, removes
+#    special characters, converts it to
+#    lowercase, and sets global variables
+#    PROJECT_NAME and PROJECT_PATH.
+########################################
+slugify() {
+  local raw_name="$*"
+  PROJECT_NAME="$(echo "$raw_name" \
+    | iconv -t ascii//TRANSLIT \
+    | sed -E 's/[~\^]+//g' \
+    | sed -E 's/[^a-zA-Z0-9]+/-/g' \
+    | sed -E 's/^-+|-+$//g' \
+    | tr '[:upper:]' '[:lower:]'
+  )"
+  PROJECT_PATH="${PROJECTS_PATH}/${PROJECT_NAME}"
+}
+
+slugify "$*"
+
+########################################
+# 3. Ensure $PROJECTS_PATH Exists
+########################################
+if [ ! -d "$PROJECTS_PATH" ]; then
+  echo "Creating directory: $PROJECTS_PATH"
+  mkdir -p "$PROJECTS_PATH"
+fi
+
+########################################
+# 4. Check if Project Directory Already Exists
+########################################
+if [ -d "$PROJECT_PATH" ]; then
+  echo "Error: Directory '${PROJECT_PATH}' already exists."
+  exit 1
+fi
+
+########################################
+# 5. Create the Next.js App
+########################################
 cd "$PROJECTS_PATH"
+echo "Creating Next.js project in: $PROJECT_PATH"
 
-# npx --yes create-next-app@latest  --ts --tailwind --eslint --src-dir --app --turbopack --import-alias "@/*" --use-npm "$INPUT"
-# as of writting this script, the second command is equivalent to the first
-npx --yes create-next-app@latest  --yes --turbopack --use-npm "$INPUT"
+npx --yes create-next-app@latest \
+  --ts \
+  --tailwind \
+  --eslint \
+  --src-dir \
+  --app \
+  --turbopack \
+  --import-alias "@/*" \
+  --use-npm \
+  "$PROJECT_NAME"
+
+########################################
+# 6. Install / Initialize shadcn
+########################################
+cd "$PROJECT_PATH"
+echo "Initializing shadcn in: $PROJECT_PATH"
+npx --yes shadcn@latest init -d
+
+########################################
+# 7. Done!
+########################################
+echo "Project '${PROJECT_NAME}' successfully created at: ${PROJECT_PATH}"
+code .
