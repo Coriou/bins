@@ -1,0 +1,10 @@
+#!/bin/bash
+
+INPUT=$1
+PROJECTS_PATH="${HOME}/Projects/"
+
+cd "$PROJECTS_PATH"
+
+# npx --yes create-next-app@latest  --ts --tailwind --eslint --src-dir --app --turbopack --import-alias "@/*" --use-npm "$INPUT"
+# as of writting this script, the second command is equivalent to the first
+npx --yes create-next-app@latest  --yes --turbopack --use-npm "$INPUT"
