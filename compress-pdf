@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+
+# compress-pdf.sh
+#
+# Description:
+#   Compress a PDF file using ImageMagick (magick) and validate size reduction.
+#   If ImageMagick fails to optimize, fallback to Ghostscript for compression.
+#
+# Requirements:
+#   - ImageMagick (magick)
+#   - qpdf (optional, for repairing PDFs)
+#   - Ghostscript (optional, for fallback optimization)
+
+set -euo pipefail
+
+########################################
+# Helper Functions
+########################################
+
+# Check if a command exists
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+# Print size in a human-readable format
+human_readable_size() {
+  local size="$1"
+  if [ "$size" -ge 1073741824 ]; then
+    printf "%.2fG" "$(bc <<< "scale=2; $size/1073741824")"
+  elif [ "$size" -ge 1048576 ]; then
+    printf "%.2fM" "$(bc <<< "scale=2; $size/1048576")"
+  elif [ "$size" -ge 1024 ]; then
+    printf "%.2fK" "$(bc <<< "scale=2; $size/1024")"
+  else
+    printf "%dB" "$size"
+  fi
+}
+
+########################################
+# 1. Check Dependencies
+########################################
+
+# Ensure ImageMagick is installed
+if ! command_exists magick; then
+  echo "Error: ImageMagick (magick) not found. Please install it first."
+  exit 1
+fi
+
+# Ensure Ghostscript is installed (optional)
+if ! command_exists gs; then
+  echo "Warning: Ghostscript not found. Fallback compression will be unavailable."
+fi
+
+# Ensure qpdf is installed (optional)
+if ! command_exists qpdf; then
+  echo "Warning: qpdf not found. Skipping PDF repair."
+fi
+
+########################################
+# 2. Input Validation
+########################################
+
+if [ $# -lt 1 ]; then
+  echo "Usage: $0 <input_pdf> [compression_level]"
+  exit 1
+fi
+
+INPUT_FILE="$1"
+COMPRESSION_LEVEL="${2:-medium}"
+
+if [ ! -f "$INPUT_FILE" ]; then
+  echo "Error: File '$INPUT_FILE' not found."
+  exit 1
+fi
+
+if [[ "$INPUT_FILE" != *.pdf ]]; then
+  echo "Error: File '$INPUT_FILE' is not a PDF."
+  exit 1
+fi
+
+########################################
+# 3. Map Compression Level to DPI
+########################################
+
+case "$COMPRESSION_LEVEL" in
+  low)
+    DPI=72
+    QUALITY=50
+    ;;
+  medium)
+    DPI=150
+    QUALITY=75
+    ;;
+  high)
+    DPI=300
+    QUALITY=90
+    ;;
+  max)
+    DPI=600
+    QUALITY=100
+    ;;
+  *)
+    echo "Error: Unknown compression level '$COMPRESSION_LEVEL'."
+    echo "Valid options are: low, medium, high, max."
+    exit 1
+    ;;
+esac
+
+########################################
+# 4. Prepare Output Path
+########################################
+
+INPUT_DIR="$(dirname "$INPUT_FILE")"
+INPUT_BASENAME="$(basename "$INPUT_FILE" .pdf)"
+REPAIRED_FILE="${INPUT_DIR}/${INPUT_BASENAME}-repaired.pdf"
+OUTPUT_FILE="${INPUT_DIR}/${INPUT_BASENAME}-compressed.pdf"
+
+########################################
+# 5. Optional PDF Repair with qpdf
+########################################
+
+if command_exists qpdf; then
+  echo "Repairing PDF with qpdf: $INPUT_FILE -> $REPAIRED_FILE"
+  qpdf --linearize "$INPUT_FILE" "$REPAIRED_FILE"
+  INPUT_FILE="$REPAIRED_FILE"
+else
+  echo "Skipping PDF repair as qpdf is not available."
+fi
+
+########################################
+# 6. Compress PDF with ImageMagick
+########################################
+
+echo "Compressing PDF with ImageMagick: $INPUT_FILE -> $OUTPUT_FILE"
+magick -density "$DPI" -quality "$QUALITY" -compress JPEG "$INPUT_FILE" "$OUTPUT_FILE"
+
+########################################
+# 7. Validate Compression
+########################################
+
+INPUT_SIZE=$(stat -f%z "$INPUT_FILE")
+OUTPUT_SIZE=$(stat -f%z "$OUTPUT_FILE")
+
+if [ "$OUTPUT_SIZE" -ge "$INPUT_SIZE" ]; then
+  echo "Warning: ImageMagick compression increased the file size. Falling back to Ghostscript (if available)."
+
+  if command_exists gs; then
+    GS_OUTPUT_FILE="${INPUT_DIR}/${INPUT_BASENAME}-gs-compressed.pdf"
+    gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dPDFSETTINGS=/ebook \
+      -sOutputFile="$GS_OUTPUT_FILE" "$INPUT_FILE"
+
+    OUTPUT_FILE="$GS_OUTPUT_FILE"
+    OUTPUT_SIZE=$(stat -f%z "$OUTPUT_FILE")
+  else
+    echo "Error: Ghostscript is not installed. Unable to compress further."
+    exit 1
+  fi
+fi
+
+########################################
+# 8. Calculate and Display Stats
+########################################
+
+SIZE_DIFF=$((INPUT_SIZE - OUTPUT_SIZE))
+PERCENT_SAVINGS=$(awk "BEGIN {printf \"%.2f\", ($SIZE_DIFF / $INPUT_SIZE) * 100}")
+
+HUMAN_INPUT_SIZE=$(human_readable_size "$INPUT_SIZE")
+HUMAN_OUTPUT_SIZE=$(human_readable_size "$OUTPUT_SIZE")
+HUMAN_SIZE_DIFF=$(human_readable_size "$SIZE_DIFF")
+
+echo "Compression complete!"
+echo "Input file size:   $HUMAN_INPUT_SIZE"
+echo "Output file size:  $HUMAN_OUTPUT_SIZE"
+echo "Size reduction:    $HUMAN_SIZE_DIFF ($PERCENT_SAVINGS%)"
+echo "Compressed PDF saved to: $OUTPUT_FILE"
+
+########################################
+# 9. Cleanup Temporary Files
+########################################
+
+if [ -n "${REPAIRED_FILE:-}" ] && [ -f "$REPAIRED_FILE" ]; then
+  rm -f "$REPAIRED_FILE"
+fi
