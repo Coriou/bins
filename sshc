@@ -1,0 +1,4 @@
+#!/bin/bash
+
+ssh-add -D
+ssh -T git@github.com

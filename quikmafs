@@ -1,0 +1,19 @@
+#!/bin/bash
+
+# Check if an argument is provided
+if [ $# -eq 0 ]; then
+    echo "Usage: $0 <math-expression>"
+    echo "Example: $0 100 + 100"
+    exit 1
+fi
+
+# Combine all arguments into a single expression
+EXPRESSION="$*"
+
+# Use bc to calculate the result
+RESULT=$(bc <<< "scale=2; ($EXPRESSION)/1")
+
+# Output the result
+echo "= $RESULT"
+
+
