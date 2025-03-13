@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# Set the nvm directory (adjust if your installation is elsewhere)
+export NVM_DIR="$HOME/.nvm"
+
+# Load nvm if it's installed; exit if not found
+if [ -s "$NVM_DIR/nvm.sh" ]; then
+  . "$NVM_DIR/nvm.sh"
+  echo "nvm is installed (version: $(nvm --version))."
+else
+  echo "nvm not found. Please install nvm first."
+  exit 1
+fi
+
+# Display the currently set default Node.js version
+echo "Fetching the current default Node.js version..."
+CURRENT_DEFAULT=$(nvm ls default | grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+')
+if [ -z "$CURRENT_DEFAULT" ]; then
+  echo "No default Node.js version is set."
+else
+  echo "Current default Node.js version: $CURRENT_DEFAULT"
+fi
+
+# Fetch the latest remote LTS version
+echo "Fetching the latest remote LTS version..."
+LATEST_LTS=$(nvm version-remote --lts)
+echo "Latest remote LTS version available: $LATEST_LTS"
+
+# If the current default is already the latest LTS, exit without upgrading
+if [ "$CURRENT_DEFAULT" == "$LATEST_LTS" ]; then
+  echo "Your current default Node.js version ($CURRENT_DEFAULT) is already the latest LTS."
+  exit 0
+fi
+
+# Prompt the user for confirmation to upgrade
+read -p "Do you want to upgrade to Node.js $LATEST_LTS? [Y/n] " confirm
+
+if [[ "$confirm" =~ ^[Yy]$ || "$confirm" == "" ]]; then
+  echo "Installing Node.js $LATEST_LTS..."
+  nvm install "$LATEST_LTS"
+  
+  echo "Setting the default Node.js version to $LATEST_LTS..."
+  nvm alias default "$LATEST_LTS"
+  
+  echo "Upgrade complete. The new default Node.js version is:"
+  nvm ls default
+else
+  echo "Upgrade cancelled."
+fi
