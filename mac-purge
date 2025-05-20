@@ -313,7 +313,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 # Add enhanced safety for large deletions
-if [ "${#FOUND[@]}" -gt 10 ]; then
+if [ "$INTERACTIVE" -eq 0 ] && [ "${#FOUND[@]}" -gt 10 ]; then
   read -r -p "$(colorize "$RED" "⚠️  About to process ${#FOUND[@]} items. Type 'yes' to confirm: ")" CONFIRM_LARGE
   if [[ "$CONFIRM_LARGE" != "yes" ]]; then
     colorize "$YELLOW" "❎ Operation cancelled."
