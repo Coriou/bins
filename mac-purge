@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# Script designed for compatibility with Bash 3.2+ (common on macOS)
+# Avoids features like associative arrays (Bash 4.0+)
+set -euo pipefail
+
+# Colors for better readability
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+show_help() {
+  cat <<-EOF
+Usage: ${0##*/} [OPTIONS] <app-name>
+
+Options:
+  -n, --dry-run     Only list files (no deletion)
+  -e, --exclude=PAT Exclude files matching pattern (can use multiple times)
+  -x, --exact       Match app name exactly (no wildcards)
+  -i, --interactive Select files to delete individually
+  -t, --trash       Move to trash instead of permanent deletion
+  -v, --verbose     Show more detailed output
+  -s, --sudo        Include system-level locations (requires sudo)
+  -h, --help        Show this help and exit
+
+Example:
+  mac-purge hyprnote
+  mac-purge --exclude="*settings*" --dry-run firefox
+EOF
+}
+
+# Function to colorize output
+colorize() {
+  local color=$1
+  local text=$2
+  echo -e "${color}${text}${NC}"
+}
+
+# Function to find matching files
+find_matching_files() {
+  local pattern="$1"
+  local locations=("${@:2}")
+  
+  if [ "$VERBOSE" -eq 1 ]; then
+    colorize "$BLUE" "🔍 Searching locations:"
+    printf "  %s\n" "${locations[@]}"
+  fi
+  
+  local find_args=("-iname")
+  if [ "$EXACT_MATCH" -eq 1 ]; then
+    find_args+=("$APP_NAME")
+  else
+    find_args+=("$pattern")
+  fi
+
+  if [ ${#EXCLUDES[@]} -gt 0 ]; then
+    for exclude in "${EXCLUDES[@]}"; do
+      find_args+=("-not" "-path" "$exclude")
+    done
+  fi
+
+  if [ "$VERBOSE" -eq 1 ]; then
+    colorize "$BLUE" "⚙️  Using find pattern: ${find_args[*]}"
+  fi
+  
+  # FOUND is initialized globally.
+  # To maintain compatibility with older Bash versions (pre-4.0, common on macOS),
+  # we avoid associative arrays. Instead, FOUND will store strings in the
+  # format "size|filepath". This string is then parsed when individual
+  # components are needed.
+
+  while IFS= read -r -d '' file; do
+    local size
+    size=$(du -sh "$file" 2>/dev/null | cut -f1)
+    if [ -z "$size" ]; then
+      size="N/A" # Handle cases where size cannot be determined
+    fi
+    # Store as "size|filepath" for compatibility (see note above FOUND initialization)
+    FOUND+=("${size}|${file}")
+  done < <(find "${locations[@]}" "${find_args[@]}" -print0 2>/dev/null || true)
+}
+
+# Function to display file sizes in a sorted list
+display_file_sizes() {
+  local file_details_array=("$@") # Contains "size|filepath" strings
+  
+  if [ "${#file_details_array[@]}" -eq 0 ]; then
+    return
+  fi
+
+  printf "%s\n" "${file_details_array[@]}" | 
+    sort -hr | # Sorts based on the human-readable size prefix
+    # IFS is used to parse the "size|filepath" string
+    while IFS="|" read -r size file; do
+      if [ -n "$file" ]; then # Ensure file part is not empty
+          printf "  %s %s\n" "$size" "$file"
+      elif [ -n "$size" ]; then # Fallback if parsing was unusual
+          printf "  %s\n" "$size"
+      fi
+    done
+}
+
+# Function to calculate total size
+calculate_total_size() {
+  local file_details_array=("$@") # Contains "size|filepath"
+  local files_to_sum=()
+  
+  for entry in "${file_details_array[@]}"; do
+    # Extract filepath (part after first '|') from "size|filepath" string
+    files_to_sum+=("${entry#*|}")
+  done
+
+  if [ "${#files_to_sum[@]}" -eq 0 ]; then
+    echo "0B"
+    return
+  fi
+  
+  printf '%s\0' "${files_to_sum[@]}" \
+    | xargs -0 du -ch 2>/dev/null \
+    | awk '/total$/ {print $1}'
+}
+
+# Function to move files to trash
+move_to_trash() {
+  local files_to_trash=("$@") # Expects an array of file paths
+  local success=0
+  local failed=0
+  
+  if [ "${#files_to_trash[@]}" -eq 0 ]; then
+    return
+  fi
+  
+  for file in "${files_to_trash[@]}"; do
+    if osascript -e "tell application \"Finder\" to delete POSIX file \"${file}\"" &>/dev/null; then
+      ((success++))
+    else
+      ((failed++))
+    fi
+  done
+  
+  colorize "$GREEN" "✅ Moved $success items to trash."
+  if [ "$failed" -gt 0 ]; then
+    colorize "$RED" "❌ Failed to move $failed items."
+  fi
+}
+
+# Function for interactive deletion
+interactive_delete() {
+  local file_details_array=("$@") # Contains "size|filepath"
+  local to_delete_paths=()       # Stores only file paths
+  
+  colorize "$YELLOW" "⚠️  Interactive mode - select files to delete:"
+  
+  for ((i=0; i<${#file_details_array[@]}; i++)); do
+    local entry="${file_details_array[$i]}"
+    # Parse "size|filepath" string
+    local size="${entry%%|*}" 
+    local file="${entry#*|}"
+    
+    read -r -p "Delete $file ($size)? [y/N]: " confirm
+    case "$confirm" in
+      [Yy]*)
+        to_delete_paths+=("$file") # Add the actual file path
+        ;;
+    esac
+  done
+  
+  if [ "${#to_delete_paths[@]}" -eq 0 ]; then
+    colorize "$YELLOW" "❎ No files selected for deletion."
+    # exit 0 # Consider returning and letting the main script exit
+    return
+  fi
+  
+  colorize "$YELLOW" "🧹 Selected ${#to_delete_paths[@]} of ${#file_details_array[@]} files for deletion."
+  
+  if [ "$TRASH_MODE" -eq 1 ]; then
+    move_to_trash "${to_delete_paths[@]}" # Pass array of paths
+  else
+    if [ "${#to_delete_paths[@]}" -gt 0 ]; then
+        printf '%s\0' "${to_delete_paths[@]}" \
+          | xargs -0 rm -rf -- \
+          && colorize "$GREEN" "✅ Deleted ${#to_delete_paths[@]} items."
+    fi
+  fi
+}
+
+# parse flags
+DRY_RUN=0
+VERBOSE=0
+EXACT_MATCH=0
+INTERACTIVE=0
+TRASH_MODE=0
+SUDO_MODE=0
+EXCLUDES=()
+ARGS=()
+
+while (( "$#" )); do
+  case "$1" in
+    -n|--dry-run)     DRY_RUN=1; shift ;;
+    -e|--exclude=*)   EXCLUDES+=("${1#*=}"); shift ;;
+    -e|--exclude)     EXCLUDES+=("$2"); shift 2 ;;
+    -x|--exact)       EXACT_MATCH=1; shift ;;
+    -i|--interactive) INTERACTIVE=1; shift ;;
+    -t|--trash)       TRASH_MODE=1; shift ;;
+    -v|--verbose)     VERBOSE=1; shift ;;
+    -s|--sudo)        SUDO_MODE=1; shift ;;
+    -h|--help)        show_help; exit 0 ;;
+    --)               shift; break ;;
+    -?*)              colorize "$RED" "Unknown option: $1" >&2; show_help; exit 1 ;;
+    *)                ARGS+=("$1"); shift ;;
+  esac
+done
+set -- "${ARGS[@]}"
+
+# require app name
+if [ "$#" -eq 0 ]; then
+  colorize "$RED" "❌ Please provide an app name to search for." >&2
+  show_help
+  exit 1
+fi
+
+# Clean variable assignment
+APP_NAME="$1"
+PATTERN="*${APP_NAME}*"
+
+# locations to search
+LOCATIONS=(
+  "$HOME/Library/Application Support"
+  "$HOME/Library/Caches"
+  "$HOME/Library/Preferences"
+  "$HOME/Library/Logs"
+  "$HOME/Library/Containers"
+  "$HOME/Library/Saved Application State"
+  "$HOME/Library/LaunchAgents"
+  "$HOME/.cache"
+  "$HOME/.config"
+  "$HOME/.local"
+  "$HOME/Documents"
+)
+
+# Add system locations if sudo mode is enabled
+if [ "$SUDO_MODE" -eq 1 ]; then
+  if [ "$EUID" -ne 0 ]; then
+    colorize "$YELLOW" "⚠️  System locations require root privileges. Please run with sudo."
+    exit 1
+  fi
+  LOCATIONS+=(
+    "/Library/Application Support"
+    "/Library/Caches"
+    "/Library/Preferences"
+    "/Library/Logs"
+  )
+fi
+
+# Start the search
+colorize "$BLUE" "🔍 Searching for leftovers matching: $APP_NAME"
+if [ "${#EXCLUDES[@]}" -gt 0 ]; then
+  colorize "$BLUE" "🚫 Excluding patterns: ${EXCLUDES[*]}"
+fi
+
+# Show progress indicator for verbose mode
+if [ "$VERBOSE" -eq 1 ]; then
+  colorize "$BLUE" "⏳ Starting search..."
+fi
+
+# collect matches
+# FOUND is an indexed array. For Bash 3.2+ compatibility (macOS default),
+# it stores strings formatted as "size|filepath" instead of using associative arrays.
+FOUND=()
+find_matching_files "$PATTERN" "${LOCATIONS[@]}"
+
+if [ "${#FOUND[@]}" -eq 0 ]; then
+  colorize "$GREEN" "✅ No leftover files found for $APP_NAME."
+  exit 0
+fi
+
+# Group files by location for better readability
+colorize "$YELLOW" "⚠️  Found ${#FOUND[@]} items:"
+display_file_sizes "${FOUND[@]}"
+
+TOTAL_SIZE=$(calculate_total_size "${FOUND[@]}")
+
+echo
+colorize "$YELLOW" "🧾 Total size to delete: $TOTAL_SIZE"
+echo
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  colorize "$BLUE" "🔎 Dry-run mode, no files will be deleted."
+  exit 0
+fi
+
+# Add enhanced safety for large deletions
+if [ "${#FOUND[@]}" -gt 10 ]; then
+  read -r -p "$(colorize "$RED" "⚠️  About to process ${#FOUND[@]} items. Type 'yes' to confirm: ")" CONFIRM_LARGE
+  if [[ "$CONFIRM_LARGE" != "yes" ]]; then
+    colorize "$YELLOW" "❎ Operation cancelled."
+    exit 0
+  fi
+fi
+
+# Handle interactive mode
+if [ "$INTERACTIVE" -eq 1 ]; then
+  interactive_delete "${FOUND[@]}" # FOUND contains "size|filepath"
+  exit 0 
+fi
+
+# Normal deletion path
+read -r -p "$(colorize "$YELLOW" "🧹 Delete all of these files? [y/N]: ")" CONFIRM
+case "$CONFIRM" in
+  [Yy]*) 
+    # Extract file paths from FOUND (which contains "size|filepath" strings)
+    FILE_PATHS_TO_PROCESS=()
+    for entry in "${FOUND[@]}"; do
+      # Extract filepath (part after first '|')
+      FILE_PATHS_TO_PROCESS+=("${entry#*|}")
+    done
+
+    if [ "${#FILE_PATHS_TO_PROCESS[@]}" -eq 0 ]; then
+        colorize "$YELLOW" "❎ No files to process."
+    elif [ "$TRASH_MODE" -eq 1 ]; then
+      move_to_trash "${FILE_PATHS_TO_PROCESS[@]}"
+    else
+      printf '%s\0' "${FILE_PATHS_TO_PROCESS[@]}" \
+        | xargs -0 rm -rf -- \
+        && colorize "$GREEN" "✅ Deleted all items."
+        
+      # Verify deletion
+      REMAINING=0
+      for file_to_check in "${FILE_PATHS_TO_PROCESS[@]}"; do # Check paths we attempted to delete
+        if [ -e "$file_to_check" ]; then
+          ((REMAINING++))
+        fi
+      done
+      
+      if [ "$REMAINING" -gt 0 ]; then
+        colorize "$RED" "⚠️  $REMAINING files could not be deleted (permissions issue)."
+      fi
+    fi
+    ;;
+  *)
+    colorize "$YELLOW" "❎ Deletion cancelled."
+    ;;
+esac
