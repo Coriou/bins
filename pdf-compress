@@ -1,8 +1,15 @@
 #!/bin/bash
 
+# Check for --max flag
+MAX_COMPRESSION=false
+if [ "$1" = "--max" ]; then
+    MAX_COMPRESSION=true
+    shift
+fi
+
 # Check if an input file is provided
 if [ -z "$1" ]; then
-    echo "Usage: $0 input.pdf"
+    echo "Usage: $0 [--max] input.pdf"
     exit 1
 fi
 
@@ -74,12 +81,19 @@ if [ -z "$original_size" ] || ! [[ "$original_size" =~ ^[0-9]+$ ]] || [ "$origin
     exit 1
 fi
 
+# Set Ghostscript compression level
+if [ "$MAX_COMPRESSION" = true ]; then
+    GS_QUALITY="/screen"
+else
+    GS_QUALITY="/ebook"
+fi
+
 echo "Compressing '$INPUT_FILE'..."
 echo "Original size: $(format_size $original_size)"
 
 gs -sDEVICE=pdfwrite \
      -dCompatibilityLevel=1.4 \
-     -dPDFSETTINGS=/ebook \
+     -dPDFSETTINGS=$GS_QUALITY \
      -dNOPAUSE \
      -dQUIET \
      -dBATCH \
