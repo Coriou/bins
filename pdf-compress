@@ -2,8 +2,8 @@
 
 # Check if an input file is provided
 if [ -z "$1" ]; then
-  echo "Usage: $0 input.pdf"
-  exit 1
+    echo "Usage: $0 input.pdf"
+    exit 1
 fi
 
 INPUT_FILE="$1"
@@ -11,106 +11,122 @@ OUTPUT_FILE="${INPUT_FILE%.pdf}-compressed.pdf"
 
 # Check if output file already exists
 if [ -f "$OUTPUT_FILE" ]; then
-  read -p "Output file '$OUTPUT_FILE' already exists. Overwrite? (y/N): " -n 1 -r
-  echo # Move to a new line
-  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-    echo "Operation cancelled by user."
-    exit 1
-  fi
+    read -p "Output file '$OUTPUT_FILE' already exists. Overwrite? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Operation cancelled by user."
+        exit 1
+    fi
 fi
 
 # Function to format bytes to human-readable format
 format_size() {
-  local size_in_bytes=$1
-  local i=0
-  local units=("B" "KiB" "MiB" "GiB" "TiB")
+    local size_in_bytes=$1
+    local i=0
+    local units=("B" "KiB" "MiB" "GiB" "TiB")
 
-  # Ensure input is a non-empty number
-  if ! [[ "$size_in_bytes" =~ ^[0-9]+$ ]] || [ -z "$size_in_bytes" ]; then
-    echo "${size_in_bytes:-0}B (Invalid or empty size)"
-    return
-  fi
+    if ! [[ "$size_in_bytes" =~ ^[0-9]+$ ]] || [ -z "$size_in_bytes" ]; then
+        echo "${size_in_bytes:-0}B"
+        return
+    fi
 
-  local s=$size_in_bytes
-  # Loop to divide by 1024 until the number is small enough or we run out of units
-  # bc is used for floating point division for better accuracy before final integer conversion
-  while (( $(echo "$s >= 1024 && $i < 4" | bc -l) )); do
-    s=$(echo "scale=2; $s / 1024" | bc)
-    i=$((i + 1))
-  done
+    local s=$size_in_bytes
+    while (( $(echo "$s >= 1024 && $i < 4" | bc -l) )); do
+        s=$(echo "scale=2; $s / 1024" | bc)
+        i=$((i + 1))
+    done
 
-  # awk for formatting to two decimal places if it's not bytes, otherwise just print integer
-  if [ "$i" -eq 0 ]; then
-    printf "%d%s\n" "$size_in_bytes" "${units[$i]}"
-  else
-    # Use awk to format to 2 decimal places for KiB, MiB, etc.
-    # s might be like "123.45" or "123.00"
-    # We want to show .00 for consistency if it's not Bytes
-    awk -v s="$s" -v unit="${units[$i]}" 'BEGIN {printf "%.2f%s\n", s, unit}'
-  fi
+    if [ "$i" -eq 0 ]; then
+        printf "%d%s\n" "$size_in_bytes" "${units[$i]}"
+    else
+        awk -v s="$s" -v unit="${units[$i]}" 'BEGIN {printf "%.2f%s\n", s, unit}'
+    fi
+}
+
+# Function to get current time in ms or s, as portable as possible
+get_time_ms() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys, time; sys.stdout.write(str(int(time.time() * 1000)))'
+        return
+    elif command -v python >/dev/null 2>&1; then
+        python -c 'import sys, time; sys.stdout.write(str(int(time.time() * 1000)))'
+        return
+    elif command -v gdate >/dev/null 2>&1; then
+        gdate +%s%3N
+        return
+    elif date +%s%3N >/dev/null 2>&1 && [[ "$(date +%s%3N)" =~ ^[0-9]+$ ]]; then
+        date +%s%3N
+        return
+    else
+        date +%s
+        return
+    fi
 }
 
 # Record start time
-start_time=$(date +%s)
+start_time=$(get_time_ms)
 
 # Get original file size
 original_size=$(stat -f%z "$INPUT_FILE")
 
-# Validate original file size
 if [ -z "$original_size" ] || ! [[ "$original_size" =~ ^[0-9]+$ ]] || [ "$original_size" -eq 0 ]; then
-  echo "Error: Input file '$INPUT_FILE' is empty, does not exist, or its size could not be determined."
-  exit 1
+    echo "Error: Input file '$INPUT_FILE' is empty, does not exist, or its size could not be determined."
+    exit 1
 fi
 
 echo "Compressing '$INPUT_FILE'..."
-# Display original size early using the new formatter
 echo "Original size: $(format_size $original_size)"
 
 gs -sDEVICE=pdfwrite \
-   -dCompatibilityLevel=1.4 \
-   -dPDFSETTINGS=/ebook \
-   -dNOPAUSE \
-   -dQUIET \
-   -dBATCH \
-   -sOutputFile="$OUTPUT_FILE" \
-   "$INPUT_FILE"
+     -dCompatibilityLevel=1.4 \
+     -dPDFSETTINGS=/ebook \
+     -dNOPAUSE \
+     -dQUIET \
+     -dBATCH \
+     -sOutputFile="$OUTPUT_FILE" \
+     "$INPUT_FILE"
 
-# Check if Ghostscript command was successful and output file was created
 if [ $? -ne 0 ] || [ ! -f "$OUTPUT_FILE" ] || [ ! -s "$OUTPUT_FILE" ]; then
-  echo "Error: PDF compression failed. Ghostscript may have encountered an error, or the output file ('$OUTPUT_FILE') was not created or is empty."
-  # Clean up potentially empty/failed output file
-  [ -f "$OUTPUT_FILE" ] && rm "$OUTPUT_FILE"
-  exit 1
+    echo "Error: PDF compression failed. Ghostscript may have encountered an error, or the output file ('$OUTPUT_FILE') was not created or is empty."
+    [ -f "$OUTPUT_FILE" ] && rm "$OUTPUT_FILE"
+    exit 1
 fi
 
 # Record end time
-end_time=$(date +%s)
+end_time=$(get_time_ms)
 
-# Get compressed file size
 compressed_size=$(stat -f%z "$OUTPUT_FILE")
 
-# Validate compressed file size
 if [ -z "$compressed_size" ] || ! [[ "$compressed_size" =~ ^[0-9]+$ ]]; then
     echo "Error: Could not determine the size of the compressed file '$OUTPUT_FILE'."
-    # If the output file exists but its size can't be read, it might be corrupted or an issue with permissions.
-    # Consider if $OUTPUT_FILE should be removed here as well.
     exit 1
 fi
 
 # Calculate time taken
-time_taken=$((end_time - start_time))
-
-# Calculate compression ratio
-# original_size is confirmed > 0 and numeric; compressed_size is confirmed numeric.
-compression_ratio="N/A" # Default if calculation is not possible (e.g. original_size was 0, though we exit earlier)
-if [ "$original_size" -gt 0 ]; then # This check is somewhat redundant due to earlier validation but ensures safety
-  compression_ratio=$(awk "BEGIN {printf \"%.2f\", ($original_size - $compressed_size) * 100 / $original_size}")
+if [[ "$start_time" =~ ^[0-9]+$ && "$end_time" =~ ^[0-9]+$ ]]; then
+    if [ ${#start_time} -ge 13 ]; then
+        time_taken=$(($end_time - $start_time))
+        output_time_unit="ms"
+    else
+        time_taken=$(($end_time - $start_time))
+        output_time_unit="s"
+    fi
+else
+    time_taken="N/A"
+    output_time_unit=""
 fi
 
-echo # Add a blank line for readability before the summary
+compression_ratio="N/A"
+if [ "$original_size" -gt 0 ]; then
+  if [[ "$compressed_size" =~ ^[0-9]+$ && "$original_size" =~ ^[0-9]+$ ]]; then
+    compression_ratio=$(awk "BEGIN {printf \"%.2f\", ($original_size - $compressed_size) * 100 / $original_size}")
+  fi
+fi
+
+echo
 echo "--- Compression Summary ---"
 echo "Compressed PDF saved as: $OUTPUT_FILE"
 echo "Original size: $(format_size $original_size)"
 echo "Compressed size: $(format_size $compressed_size)"
-echo "Compression ratio: $compression_ratio%"
-echo "Time taken: ${time_taken}s"
+echo "Compression ratio: ${compression_ratio}%"
+echo "Time taken: ${time_taken}${output_time_unit}"
