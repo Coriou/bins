@@ -1,0 +1,146 @@
+#!/bin/bash
+
+# Check for --max flag
+MAX_COMPRESSION=false
+if [ "$1" = "--max" ]; then
+    MAX_COMPRESSION=true
+    shift
+fi
+
+# Check if an input file is provided
+if [ -z "$1" ]; then
+    echo "Usage: $0 [--max] input.pdf"
+    exit 1
+fi
+
+INPUT_FILE="$1"
+OUTPUT_FILE="${INPUT_FILE%.pdf}-compressed.pdf"
+
+# Check if output file already exists
+if [ -f "$OUTPUT_FILE" ]; then
+    read -p "Output file '$OUTPUT_FILE' already exists. Overwrite? (y/N): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Operation cancelled by user."
+        exit 1
+    fi
+fi
+
+# Function to format bytes to human-readable format
+format_size() {
+    local size_in_bytes=$1
+    local i=0
+    local units=("B" "KiB" "MiB" "GiB" "TiB")
+
+    if ! [[ "$size_in_bytes" =~ ^[0-9]+$ ]] || [ -z "$size_in_bytes" ]; then
+        echo "${size_in_bytes:-0}B"
+        return
+    fi
+
+    local s=$size_in_bytes
+    while (( $(echo "$s >= 1024 && $i < 4" | bc -l) )); do
+        s=$(echo "scale=2; $s / 1024" | bc)
+        i=$((i + 1))
+    done
+
+    if [ "$i" -eq 0 ]; then
+        printf "%d%s\n" "$size_in_bytes" "${units[$i]}"
+    else
+        awk -v s="$s" -v unit="${units[$i]}" 'BEGIN {printf "%.2f%s\n", s, unit}'
+    fi
+}
+
+# Function to get current time in ms or s, as portable as possible
+get_time_ms() {
+    if command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import sys, time; sys.stdout.write(str(int(time.time() * 1000)))'
+        return
+    elif command -v python >/dev/null 2>&1; then
+        python -c 'import sys, time; sys.stdout.write(str(int(time.time() * 1000)))'
+        return
+    elif command -v gdate >/dev/null 2>&1; then
+        gdate +%s%3N
+        return
+    elif date +%s%3N >/dev/null 2>&1 && [[ "$(date +%s%3N)" =~ ^[0-9]+$ ]]; then
+        date +%s%3N
+        return
+    else
+        date +%s
+        return
+    fi
+}
+
+# Record start time
+start_time=$(get_time_ms)
+
+# Get original file size
+original_size=$(stat -f%z "$INPUT_FILE")
+
+if [ -z "$original_size" ] || ! [[ "$original_size" =~ ^[0-9]+$ ]] || [ "$original_size" -eq 0 ]; then
+    echo "Error: Input file '$INPUT_FILE' is empty, does not exist, or its size could not be determined."
+    exit 1
+fi
+
+# Set Ghostscript compression level
+if [ "$MAX_COMPRESSION" = true ]; then
+    GS_QUALITY="/screen"
+else
+    GS_QUALITY="/ebook"
+fi
+
+echo "Compressing '$INPUT_FILE'..."
+echo "Original size: $(format_size $original_size)"
+
+gs -sDEVICE=pdfwrite \
+     -dCompatibilityLevel=1.4 \
+     -dPDFSETTINGS=$GS_QUALITY \
+     -dNOPAUSE \
+     -dQUIET \
+     -dBATCH \
+     -sOutputFile="$OUTPUT_FILE" \
+     "$INPUT_FILE"
+
+if [ $? -ne 0 ] || [ ! -f "$OUTPUT_FILE" ] || [ ! -s "$OUTPUT_FILE" ]; then
+    echo "Error: PDF compression failed. Ghostscript may have encountered an error, or the output file ('$OUTPUT_FILE') was not created or is empty."
+    [ -f "$OUTPUT_FILE" ] && rm "$OUTPUT_FILE"
+    exit 1
+fi
+
+# Record end time
+end_time=$(get_time_ms)
+
+compressed_size=$(stat -f%z "$OUTPUT_FILE")
+
+if [ -z "$compressed_size" ] || ! [[ "$compressed_size" =~ ^[0-9]+$ ]]; then
+    echo "Error: Could not determine the size of the compressed file '$OUTPUT_FILE'."
+    exit 1
+fi
+
+# Calculate time taken
+if [[ "$start_time" =~ ^[0-9]+$ && "$end_time" =~ ^[0-9]+$ ]]; then
+    if [ ${#start_time} -ge 13 ]; then
+        time_taken=$(($end_time - $start_time))
+        output_time_unit="ms"
+    else
+        time_taken=$(($end_time - $start_time))
+        output_time_unit="s"
+    fi
+else
+    time_taken="N/A"
+    output_time_unit=""
+fi
+
+compression_ratio="N/A"
+if [ "$original_size" -gt 0 ]; then
+  if [[ "$compressed_size" =~ ^[0-9]+$ && "$original_size" =~ ^[0-9]+$ ]]; then
+    compression_ratio=$(awk "BEGIN {printf \"%.2f\", ($original_size - $compressed_size) * 100 / $original_size}")
+  fi
+fi
+
+echo
+echo "--- Compression Summary ---"
+echo "Compressed PDF saved as: $OUTPUT_FILE"
+echo "Original size: $(format_size $original_size)"
+echo "Compressed size: $(format_size $compressed_size)"
+echo "Compression ratio: ${compression_ratio}%"
+echo "Time taken: ${time_taken}${output_time_unit}"
