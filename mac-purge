@@ -1,366 +1,528 @@
 #!/usr/bin/env bash
-# Script designed for compatibility with Bash 3.2+ (common on macOS)
-# Avoids features like associative arrays (Bash 4.0+)
+# mac-purge: Remove leftover app data & caches on macOS (bash 3.2+)
+
+# Strict mode
 set -euo pipefail
 
-# Colors for better readability
+# ── CONFIG ─────────────────────────────────────────────────────────────
+DRY_RUN=0
+VERBOSE=0
+INTERACTIVE=0
+TRASH_MODE=0
+SUDO_MODE=0
+EXACT_MATCH=0
+CACHE_ONLY=0
+declare -a EXCLUDES=()
+
+# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# ── HELP ────────────────────────────────────────────────────────────────
 show_help() {
   cat <<-EOF
-Usage: ${0##*/} [OPTIONS] <app-name>
+Usage: ${0##*/} [OPTIONS] [<app-name>]
+
+Safely removes leftover application data, caches, and logs on macOS.
 
 Options:
-  -n, --dry-run     Only list files (no deletion)
-  -e, --exclude=PAT Exclude files matching pattern (can use multiple times)
-  -x, --exact       Match app name exactly (no wildcards)
-  -i, --interactive Select files to delete individually
-  -t, --trash       Move to trash instead of permanent deletion
-  -v, --verbose     Show more detailed output
-  -s, --sudo        Include system-level locations (requires sudo)
-  -h, --help        Show this help and exit
+  -n, --dry-run          List files that would be deleted, but don't delete.
+  -e, --exclude PATTERN  Exclude any path matching PATTERN (e.g., "*.log").
+                         Can be repeated for multiple patterns.
+  -x, --exact            Match <app-name> exactly (disables wildcard matching).
+  -i, --interactive      Prompt before deleting app-specific files or cleaning
+                         cache categories.
+  -t, --trash            Move files to macOS Trash instead of permanent 'rm'.
+                         (Uses Finder, may be slower for many files).
+  -v, --verbose          Print extra information during execution.
+  -s, --sudo             Include system-wide directories (requires sudo privileges).
+                         Use with caution: sudo ${0##*/} ...
+  -c, --cache-only       Only clean general caches (npm, pip, brew, system).
+                         If <app-name> is also provided, it will be ignored.
+  -h, --help             Show this help message and exit.
 
-Example:
-  mac-purge hyprnote
-  mac-purge --exclude="*settings*" --dry-run firefox
+Examples:
+  ${0##*/}                                # Clean general caches only.
+  ${0##*/} google-chrome                  # Clean Chrome data + general caches.
+  ${0##*/} -c                             # Clean general caches only.
+  ${0##*/} -n --exclude "*CrashReports*" slack  # Dry run Slack cleanup, excluding crash reports.
+  ${0##*/} -i com.example.app             # Interactively clean for 'com.example.app'.
+  sudo ${0##*/} -s some-service           # Clean system files for 'some-service'.
+
+Notes:
+  - Always review carefully, especially with --sudo or without --dry-run.
+  - Wildcard matching for <app-name> is on by default (e.g., 'chrome' matches '*chrome*').
+    Use -x for exact name matching.
 EOF
+  exit 0
 }
 
-# Function to colorize output
-colorize() {
-  local color=$1
-  local text=$2
-  echo -e "${color}${text}${NC}"
-}
+# ── UTILITIES ───────────────────────────────────────────────────────────
+log()    { ((VERBOSE)) && printf "%b%s%b\n" "${BLUE}" "VERBOSE: $*" "${NC}"; }
+color()  { printf "%b%s%b\n" "$1" "$2" "${NC}"; }
 
-# Function to find matching files
-find_matching_files() {
-  local pattern="$1"
-  local locations=("${@:2}")
-  
-  if [ "$VERBOSE" -eq 1 ]; then
-    colorize "$BLUE" "🔍 Searching locations:"
-    printf "  %s\n" "${locations[@]}"
-  fi
-  
-  local find_args=("-iname")
-  if [ "$EXACT_MATCH" -eq 1 ]; then
-    find_args+=("$APP_NAME")
-  else
-    find_args+=("$pattern")
-  fi
+# Build search locations based on mode - returns newline-separated list for safer parsing
+build_app_locations() {
+  local -a locations=(
+    "$HOME/Library/Application Support"
+    "$HOME/Library/Caches"
+    "$HOME/Library/Preferences"
+    "$HOME/Library/Logs"
+    "$HOME/Library/Containers"
+    "$HOME/Library/Saved Application State"
+    "$HOME/Library/LaunchAgents"
+    "$HOME/Library/Application Scripts"
+    "$HOME/Library/Group Containers"
+    "$HOME/Library/Internet Plug-Ins"
+    "$HOME/Library/QuickLook"
+    "$HOME/.cache" # User-level XDG cache
+    "$HOME/.config" # User-level XDG config
+  )
 
-  if [ ${#EXCLUDES[@]} -gt 0 ]; then
-    for exclude in "${EXCLUDES[@]}"; do
-      find_args+=("-not" "-path" "$exclude")
-    done
-  fi
-
-  if [ "$VERBOSE" -eq 1 ]; then
-    colorize "$BLUE" "⚙️  Using find pattern: ${find_args[*]}"
-  fi
-  
-  # FOUND is initialized globally.
-  # To maintain compatibility with older Bash versions (pre-4.0, common on macOS),
-  # we avoid associative arrays. Instead, FOUND will store strings in the
-  # format "size|filepath". This string is then parsed when individual
-  # components are needed.
-
-  while IFS= read -r -d '' file; do
-    local size
-    size=$(du -sh "$file" 2>/dev/null | cut -f1)
-    if [ -z "$size" ]; then
-      size="N/A" # Handle cases where size cannot be determined
+  if (( SUDO_MODE )); then
+    if (( EUID != 0 )); then
+      color "$YELLOW" "⚠️  --sudo requires running as root. Try: sudo ${0##*/} $*"
+      exit 1
     fi
-    # Store as "size|filepath" for compatibility (see note above FOUND initialization)
-    FOUND+=("${size}|${file}")
-  done < <(find "${locations[@]}" "${find_args[@]}" -print0 2>/dev/null || true)
+    locations+=(
+      "/Library/Application Support"
+      "/Library/Caches"
+      "/Library/Preferences"
+      "/Library/Logs"
+      "/Applications" # For finding .app bundles themselves if pattern matches
+      "/usr/local/bin" # Common for brew installs or manual symlinks
+      "/usr/local/share"
+      "/opt" # Common for third-party software
+    )
+  fi
+  
+  # Return newline-separated for safer parsing
+  printf '%s\n' "${locations[@]}"
 }
 
-# Function to display file sizes in a sorted list
-display_file_sizes() {
-  local file_details_array=("$@") # Contains "size|filepath" strings
-  
-  if [ "${#file_details_array[@]}" -eq 0 ]; then
+# Find files matching APP in all locations, respecting excludes
+find_matches() {
+  local pattern_arg="$1"; shift
+  local search_locations_array=("$@")
+  local -a find_command_args=( \( -type f -o -type d -o -type l \) -iname "$pattern_arg" )
+
+  local ex
+  for ex in "${EXCLUDES[@]}"; do
+    find_command_args+=( -not -path "$ex" )
+  done
+
+  local d
+  for d in "${search_locations_array[@]}"; do
+    if [[ ! -d "$d" ]]; then
+      log "Search directory not found, skipping: $d"
+      continue
+    fi
+    log "Searching in: $d for pattern: $pattern_arg"
+    find "$d" -maxdepth 3 "${find_command_args[@]}" -print0 2>/dev/null || true
+  done
+}
+
+# Format and display sizes
+display_sizes() {
+  local -a files_to_size=("$@")
+  if [[ ${#files_to_size[@]} -eq 0 ]]; then
+    return
+  fi
+  printf "%s\0" "${files_to_size[@]}" | xargs -0 du -sh 2>/dev/null | sort -hr | sed 's/^/  /'
+}
+
+# Remove files (or move to Trash)
+perform_delete() {
+  local -a files_to_delete=("$@")
+  if [[ ${#files_to_delete[@]} -eq 0 ]]; then
+    log "No files specified for deletion."
     return
   fi
 
-  printf "%s\n" "${file_details_array[@]}" | 
-    sort -hr | # Sorts based on the human-readable size prefix
-    # IFS is used to parse the "size|filepath" string
-    while IFS="|" read -r size file; do
-      if [ -n "$file" ]; then # Ensure file part is not empty
-          printf "  %s %s\n" "$size" "$file"
-      elif [ -n "$size" ]; then # Fallback if parsing was unusual
-          printf "  %s\n" "$size"
+  if (( DRY_RUN )); then
+    color "$YELLOW" "🔎 Dry-run: Would remove/trash the following items:"
+    display_sizes "${files_to_delete[@]}"
+    color "$YELLOW" "Dry-run: Total ${#files_to_delete[@]} items."
+    return
+  fi
+
+  if (( TRASH_MODE )); then
+    color "$BLUE" "🗑️  Moving items to Trash..."
+    local f_trashed_count=0
+    local f_failed_count=0
+    local f
+    for f in "${files_to_delete[@]}"; do
+      if [[ ! -e "$f" ]] && [[ ! -L "$f" ]]; then
+        color "$YELLOW" "⚠️  Item not found (already deleted?): $f"
+        continue
+      fi
+      if osascript -e "tell application \"Finder\" to delete POSIX file \"${f}\"" &>/dev/null; then
+        color "$GREEN" "  Trashed: $f"
+        ((f_trashed_count++))
+      else
+        color "$RED" "  ❌ Failed to trash: $f"
+        ((f_failed_count++))
       fi
     done
-}
-
-# Function to calculate total size
-calculate_total_size() {
-  local file_details_array=("$@") # Contains "size|filepath"
-  local files_to_sum=()
-  
-  for entry in "${file_details_array[@]}"; do
-    # Extract filepath (part after first '|') from "size|filepath" string
-    files_to_sum+=("${entry#*|}")
-  done
-
-  if [ "${#files_to_sum[@]}" -eq 0 ]; then
-    echo "0B"
-    return
-  fi
-  
-  printf '%s\0' "${files_to_sum[@]}" \
-    | xargs -0 du -ch 2>/dev/null \
-    | awk '/total$/ {print $1}'
-}
-
-# Function to move files to trash
-move_to_trash() {
-  local files_to_trash=("$@") # Expects an array of file paths
-  local success=0
-  local failed=0
-  
-  if [ "${#files_to_trash[@]}" -eq 0 ]; then
-    return
-  fi
-  
-  for file in "${files_to_trash[@]}"; do
-    if osascript -e "tell application \"Finder\" to delete POSIX file \"${file}\"" &>/dev/null; then
-      ((success++))
-    else
-      ((failed++))
+    color "$GREEN" "Trashing complete. ${f_trashed_count} item(s) trashed."
+    if (( f_failed_count > 0 )); then
+        color "$RED" "${f_failed_count} item(s) failed to trash."
     fi
-  done
-  
-  colorize "$GREEN" "✅ Moved $success items to trash."
-  if [ "$failed" -gt 0 ]; then
-    colorize "$RED" "❌ Failed to move $failed items."
-  fi
-}
-
-# Function for interactive deletion
-interactive_delete() {
-  local file_details_array=("$@") # Contains "size|filepath"
-  local to_delete_paths=()       # Stores only file paths
-  
-  colorize "$YELLOW" "⚠️  Interactive mode - select files to delete:"
-  
-  for ((i=0; i<${#file_details_array[@]}; i++)); do
-    local entry="${file_details_array[$i]}"
-    # Parse "size|filepath" string
-    local size="${entry%%|*}" 
-    local file="${entry#*|}"
-    
-    read -r -p "Delete $file ($size)? [y/N]: " confirm
-    case "$confirm" in
-      [Yy]*)
-        to_delete_paths+=("$file") # Add the actual file path
-        ;;
-    esac
-  done
-  
-  if [ "${#to_delete_paths[@]}" -eq 0 ]; then
-    colorize "$YELLOW" "❎ No files selected for deletion."
-    # exit 0 # Consider returning and letting the main script exit
-    return
-  fi
-  
-  colorize "$YELLOW" "🧹 Selected ${#to_delete_paths[@]} of ${#file_details_array[@]} files for deletion."
-  
-  if [ "$TRASH_MODE" -eq 1 ]; then
-    move_to_trash "${to_delete_paths[@]}" # Pass array of paths
   else
-    if [ "${#to_delete_paths[@]}" -gt 0 ]; then
-        printf '%s\0' "${to_delete_paths[@]}" \
-          | xargs -0 rm -rf -- \
-          && colorize "$GREEN" "✅ Deleted ${#to_delete_paths[@]} items."
+    color "$BLUE" "🔥 Permanently deleting items..."
+    if printf "%s\0" "${files_to_delete[@]}" | xargs -0 rm -rf --; then
+      color "$GREEN" "✅ Deleted ${#files_to_delete[@]} item(s) successfully."
+    else
+      color "$RED" "⚠️  Some items may not have been deleted. Review output or check permissions."
     fi
   fi
 }
 
-# parse flags
-DRY_RUN=0
-VERBOSE=0
-EXACT_MATCH=0
-INTERACTIVE=0
-TRASH_MODE=0
-SUDO_MODE=0
-EXCLUDES=()
-ARGS=()
+# ── CACHE-PURGE HELPERS ──────────────────────────────────────────────────
+_clean_op_header() { color "$BLUE" "$1"; }
+_clean_op_dry_run_echo() { (( DRY_RUN )) && echo "  Command: $1"; }
+_clean_op_status() {
+    local status=$1
+    local success_msg="$2"
+    local fail_msg="$3"
+    if ((status == 0)); then
+        color "$GREEN" "$success_msg"
+    else
+        color "$YELLOW" "$fail_msg"
+    fi
+}
+
+clean_npm_cache() {
+  if ! command -v npm >/dev/null 2>&1; then 
+    color "$YELLOW" "npm not found, skipping npm cache."
+    return
+  fi
+  _clean_op_header "🔄 Purging npm cache…"
+  if (( DRY_RUN )); then
+    _clean_op_dry_run_echo "npm cache clean --force"
+  else
+    # Remove the output redirection to see what's happening
+    if npm cache clean --force; then
+      _clean_op_status 0 "✅ npm cache cleaned successfully." ""
+    else
+      _clean_op_status 1 "" "⚠️  npm cache clean failed."
+    fi
+  fi
+}
+
+clean_pip_cache() {
+  local pip_cmd=""
+  if command -v pip3 >/dev/null 2>&1; then
+    pip_cmd="pip3"
+  elif command -v pip >/dev/null 2>&1; then
+    pip_cmd="pip"
+  else
+    color "$YELLOW" "pip/pip3 not found, skipping pip cache."
+    return
+  fi
+
+  _clean_op_header "🔄 Purging $pip_cmd cache…"
+  if (( DRY_RUN )); then
+    _clean_op_dry_run_echo "$pip_cmd cache purge"
+    _clean_op_dry_run_echo "rm -rf \"$HOME/Library/Caches/pip\" (fallback)"
+  else
+    # Show output to see what's happening
+    if $pip_cmd cache purge; then
+      _clean_op_status 0 "✅ $pip_cmd cache purged successfully." ""
+    else
+      color "$YELLOW" "$pip_cmd cache purge command failed or not supported, trying manual removal."
+      if rm -rf "$HOME/Library/Caches/pip" 2>/dev/null; then
+        _clean_op_status 0 "✅ Removed $HOME/Library/Caches/pip." ""
+      else
+        _clean_op_status 1 "" "⚠️  Failed to remove $HOME/Library/Caches/pip."
+      fi
+    fi
+  fi
+}
+
+clean_brew_cache() {
+  if ! command -v brew >/dev/null 2>&1; then 
+    color "$YELLOW" "Homebrew (brew) not found, skipping brew cache."
+    return
+  fi
+  _clean_op_header "🔄 Purging Homebrew cache…"
+  if (( DRY_RUN )); then
+    _clean_op_dry_run_echo "brew cleanup --prune=all"
+    _clean_op_dry_run_echo "rm -rf \"\$(brew --cache)\"/*"
+  else
+    # Use a simpler, faster approach that won't hang
+    echo "  Cleaning Homebrew cache directory..."
+    local brew_cache_dir
+    brew_cache_dir="$(brew --cache 2>/dev/null)" || brew_cache_dir="$HOME/Library/Caches/Homebrew"
+    
+    if [[ -d "$brew_cache_dir" ]]; then
+      local cache_size
+      cache_size=$(du -sh "$brew_cache_dir" 2>/dev/null | awk '{print $1}' || echo "unknown")
+      echo "  Removing Homebrew cache ($cache_size): $brew_cache_dir"
+      rm -rf "${brew_cache_dir:?}"/* 2>/dev/null || true
+      _clean_op_status 0 "✅ Homebrew cache directory cleaned." ""
+    else
+      color "$YELLOW" "Homebrew cache directory not found, skipping."
+    fi
+    
+    # Also clean logs
+    local brew_logs_dir="$HOME/Library/Logs/Homebrew"
+    if [[ -d "$brew_logs_dir" ]]; then
+      echo "  Removing Homebrew logs..."
+      rm -rf "${brew_logs_dir:?}"/* 2>/dev/null || true
+      echo "  ✅ Homebrew logs cleaned."
+    fi
+  fi
+}
+
+clean_vs_code_sw() {
+  local sw_cache_dir="$HOME/Library/Application Support/Code/Service Worker/CacheStorage"
+  [[ -d "$sw_cache_dir" ]] || { log "VS Code Service Worker cache not found, skipping."; return; }
+  _clean_op_header "🗑️  Clearing VS Code Service Worker cache"
+  if (( DRY_RUN )); then
+    _clean_op_dry_run_echo "find \"$sw_cache_dir\" -mindepth 1 -delete"
+  else
+    # Use find to properly remove all contents
+    find "$sw_cache_dir" -mindepth 1 -delete 2>/dev/null
+    _clean_op_status $? "✅ VS Code Service Worker cache cleared." "⚠️  Failed to clear VS Code SW cache."
+  fi
+}
+
+clean_general_system_caches() {
+  _clean_op_header "🗑️  Clearing general system caches (logs, temp files)..."
+  local -a cache_dirs_to_clean=(
+    "$HOME/.cache"
+    "$HOME/Library/Caches"
+    "$HOME/Library/Logs"
+  )
+  
+  local dir_path
+  for dir_path in "${cache_dirs_to_clean[@]}"; do
+    if [[ ! -d "$dir_path" ]]; then
+      log "Cache directory not found: $dir_path"
+      continue
+    fi
+    color "$BLUE" "  Targeting directory: $dir_path"
+    if (( DRY_RUN )); then
+      _clean_op_dry_run_echo "find \"$dir_path\" -mindepth 1 -type f \\( -name \"*.cache\" -o -name \"*.tmp\" -o -name \"*log*\" \\) -delete"
+      _clean_op_dry_run_echo "find \"$dir_path\" -mindepth 1 -type d -empty -delete"
+    else
+      find "$dir_path" -mindepth 1 -type f \( -name "*.cache" -o -name "*.tmp" -o -name "*log*" \) -delete 2>/dev/null
+      find "$dir_path" -mindepth 1 -type d -empty -delete 2>/dev/null
+      log "Cleaned files in $dir_path."
+    fi
+  done
+}
+
+clean_spotlight_user_cache() {
+  local spotlight_dir="$HOME/Library/Metadata/CoreSpotlight"
+  [[ -d "$spotlight_dir" ]] || { log "CoreSpotlight user cache not found, skipping."; return; }
+  _clean_op_header "🗑️  Clearing CoreSpotlight user metadata cache"
+  if (( DRY_RUN )); then
+    _clean_op_dry_run_echo "rm -rf \"$spotlight_dir\"/*"
+  else
+    rm -rf "${spotlight_dir:?}"/*
+    _clean_op_status $? "CoreSpotlight user cache cleared." "Failed to clear CoreSpotlight user cache."
+  fi
+}
+
+clean_docker_cache() {
+  if ! command -v docker >/dev/null 2>&1; then 
+    color "$YELLOW" "Docker not found, skipping docker cache."
+    return
+  fi
+  
+  # Check if Docker daemon is running
+  if ! docker info >/dev/null 2>&1; then
+    color "$YELLOW" "Docker daemon not running, skipping docker cache."
+    return
+  fi
+  
+  _clean_op_header "🔄 Purging Docker cache…"
+  if (( DRY_RUN )); then
+    _clean_op_dry_run_echo "docker system prune -af --volumes"
+    _clean_op_dry_run_echo "docker builder prune -af"
+  else
+    # Show what will be removed
+    echo "  Removing unused containers, networks, images, and volumes..."
+    if docker system prune -af --volumes 2>&1; then
+      echo "  Cleaning build cache..."
+      docker builder prune -af >/dev/null 2>&1 || true
+      _clean_op_status 0 "✅ Docker cache cleaned successfully." ""
+    else
+      _clean_op_status 1 "" "⚠️  Docker cache clean failed."
+    fi
+  fi
+}
+
+# Unified cache cleanup with optional prompting
+run_cache_cleanup() {
+  local prompt_user_for_categories=$1
+
+  color "$GREEN" "🧹 Starting general cache cleanup process..."
+  echo "Checking available tools and caches..."
+
+  # Helper function to run cache operation with optional prompting per category
+  run_cache_op() {
+    local op_description="$1"
+    local op_function_name="$2"
+
+    if (( prompt_user_for_categories && ! DRY_RUN )); then
+      local confirm_op
+      read -r -p "Perform: $op_description? [y/N] " confirm_op
+      if [[ "$confirm_op" =~ ^[Yy]$ ]]; then
+        "$op_function_name"
+      else
+        log "Skipping: $op_description"
+      fi
+    else
+      "$op_function_name"
+    fi
+  }
+
+  run_cache_op "Clean npm cache" clean_npm_cache
+  run_cache_op "Clean pip/pip3 cache" clean_pip_cache
+  run_cache_op "Clean Homebrew cache" clean_brew_cache
+  run_cache_op "Clean Docker cache" clean_docker_cache
+  run_cache_op "Clean VS Code Service Worker cache" clean_vs_code_sw
+  run_cache_op "Clean general system caches (logs, temp files)" clean_general_system_caches
+  run_cache_op "Clean CoreSpotlight user metadata cache" clean_spotlight_user_cache
+  
+  color "$GREEN" "General cache cleanup finished."
+}
+
+# ── ARG PARSING ─────────────────────────────────────────────────────────
+APP_NAME=""
 
 while (( "$#" )); do
-  case "$1" in
-    -n|--dry-run)     DRY_RUN=1; shift ;;
-    -e|--exclude=*)   EXCLUDES+=("${1#*=}"); shift ;;
-    -e|--exclude)     EXCLUDES+=("$2"); shift 2 ;;
-    -x|--exact)       EXACT_MATCH=1; shift ;;
-    -i|--interactive) INTERACTIVE=1; shift ;;
-    -t|--trash)       TRASH_MODE=1; shift ;;
-    -v|--verbose)     VERBOSE=1; shift ;;
-    -s|--sudo)        SUDO_MODE=1; shift ;;
-    -h|--help)        show_help; exit 0 ;;
-    --)               shift; break ;;
-    -?*)              colorize "$RED" "Unknown option: $1" >&2; show_help; exit 1 ;;
-    *)                ARGS+=("$1"); shift ;;
+  case $1 in
+    -n|--dry-run)      DRY_RUN=1; shift ;;
+    -v|--verbose)      VERBOSE=1; shift ;;
+    -i|--interactive)  INTERACTIVE=1; shift ;;
+    -t|--trash)        TRASH_MODE=1; shift ;;
+    -s|--sudo)         SUDO_MODE=1; shift ;;
+    -x|--exact)        EXACT_MATCH=1; shift ;;
+    -c|--cache-only)   CACHE_ONLY=1; shift ;;
+    -e|--exclude)
+      if [[ -n "${2-}" ]]; then
+        EXCLUDES+=("$2"); shift 2
+      else
+        color "$RED" "Error: --exclude requires a PATTERN argument." >&2; exit 1
+      fi ;;
+    --exclude=*)
+      EXCLUDES+=( "${1#*=}" ); shift ;;
+    -h|--help)         show_help ;;
+    --)                shift; break ;;
+    -*)
+      color "$RED" "Unknown option: $1" >&2; show_help ;;
+    *)
+      if [[ -z "$APP_NAME" ]]; then
+        APP_NAME="$1"; shift
+      else
+        color "$RED" "Error: Too many application names. Only one <app-name> is allowed." >&2
+        color "$RED" "Provided: '$APP_NAME' and '$1'." >&2
+        show_help
+      fi ;;
   esac
 done
-set -- "${ARGS[@]}"
 
-# require app name
-if [ "$#" -eq 0 ]; then
-  colorize "$RED" "❌ Please provide an app name to search for." >&2
-  show_help
-  exit 1
+# ── MAIN ────────────────────────────────────────────────────────────────
+
+log "Script starting with settings: DRY_RUN=$DRY_RUN, VERBOSE=$VERBOSE, INTERACTIVE=$INTERACTIVE, TRASH_MODE=$TRASH_MODE, SUDO_MODE=$SUDO_MODE, EXACT_MATCH=$EXACT_MATCH, CACHE_ONLY=$CACHE_ONLY"
+if (( ${#EXCLUDES[@]} > 0 )); then
+  log "Exclusion patterns: ${EXCLUDES[*]}"
 fi
 
-# Clean variable assignment
-APP_NAME="$1"
-PATTERN="*${APP_NAME}*"
-
-# locations to search
-LOCATIONS=(
-  "$HOME/Library/Application Support"
-  "$HOME/Library/Caches"
-  "$HOME/Library/Preferences"
-  "$HOME/Library/Logs"
-  "$HOME/Library/Containers"
-  "$HOME/Library/Saved Application State"
-  "$HOME/Library/LaunchAgents"
-  "$HOME/Library/Application Scripts"
-  "$HOME/Library/Group Containers"
-  "$HOME/Library/LaunchDaemons"
-  "$HOME/Library/PreferencePanes"
-  "$HOME/Library/Internet Plug-Ins"
-  "$HOME/Library/QuickLook"
-  "$HOME/Library/Services"
-  "$HOME/Applications"
-  "$HOME/.cache"
-  "$HOME/.config"
-  "$HOME/.local"
-  "$HOME/Documents"
-)
-
-# Add system locations if sudo mode is enabled
-if [ "$SUDO_MODE" -eq 1 ]; then
-  if [ "$EUID" -ne 0 ]; then
-    colorize "$YELLOW" "⚠️  System locations require root privileges. Please run with sudo."
-    exit 1
+# Handle cache-only mode
+if (( CACHE_ONLY )); then
+  if [[ -n "$APP_NAME" ]]; then
+    color "$YELLOW" "⚠️  --cache-only is active. Ignoring specified app name: '$APP_NAME'."
   fi
-  LOCATIONS+=(
-    "/Library/Application Support"
-    "/Library/Caches"
-    "/Library/Preferences"
-    "/Library/Logs"
-    "/Library/Application Scripts"
-    "/Library/Containers"
-    "/Library/Group Containers"
-    "/Library/LaunchAgents"
-    "/Library/LaunchDaemons"
-    "/Library/PreferencePanes"
-    "/Library/Internet Plug-Ins"
-    "/Library/QuickLook"
-    "/Library/Services"
-    "/Library/StartupItems"
-    "/Applications"
-    "/usr/local/bin"
-    "/usr/local/share"
-    "/opt"
-  )
-fi
-
-# Start the search
-colorize "$BLUE" "🔍 Searching for leftovers matching: $APP_NAME"
-if [ "${#EXCLUDES[@]}" -gt 0 ]; then
-  colorize "$BLUE" "🚫 Excluding patterns: ${EXCLUDES[*]}"
-fi
-
-# Show progress indicator for verbose mode
-if [ "$VERBOSE" -eq 1 ]; then
-  colorize "$BLUE" "⏳ Starting search..."
-fi
-
-# collect matches
-# FOUND is an indexed array. For Bash 3.2+ compatibility (macOS default),
-# it stores strings formatted as "size|filepath" instead of using associative arrays.
-FOUND=()
-find_matching_files "$PATTERN" "${LOCATIONS[@]}"
-
-if [ "${#FOUND[@]}" -eq 0 ]; then
-  colorize "$GREEN" "✅ No leftover files found for $APP_NAME."
+  log "Running in cache-only mode."
+  run_cache_cleanup "$INTERACTIVE"
+  color "$GREEN" "🎉 Cache cleanup complete!"
   exit 0
 fi
 
-# Group files by location for better readability
-colorize "$YELLOW" "⚠️  Found ${#FOUND[@]} items:"
-display_file_sizes "${FOUND[@]}"
-
-TOTAL_SIZE=$(calculate_total_size "${FOUND[@]}")
-
-echo
-colorize "$YELLOW" "🧾 Total size to delete: $TOTAL_SIZE"
-echo
-
-if [ "$DRY_RUN" -eq 1 ]; then
-  colorize "$BLUE" "🔎 Dry-run mode, no files will be deleted."
+# Handle no app name provided
+if [[ -z "$APP_NAME" ]]; then
+  color "$BLUE" "ℹ️  No application name provided. Running general cache cleanup only."
+  run_cache_cleanup "$INTERACTIVE"
+  color "$GREEN" "🎉 Cache cleanup complete!"
   exit 0
 fi
 
-# Add enhanced safety for large deletions
-if [ "$INTERACTIVE" -eq 0 ] && [ "${#FOUND[@]}" -gt 10 ]; then
-  read -r -p "$(colorize "$RED" "⚠️  About to process ${#FOUND[@]} items. Type 'yes' to confirm: ")" CONFIRM_LARGE
-  if [[ "$CONFIRM_LARGE" != "yes" ]]; then
-    colorize "$YELLOW" "❎ Operation cancelled."
-    exit 0
+# App-specific cleanup
+color "$GREEN" "🚀 Starting cleanup for application: $APP_NAME"
+SEARCH_PATTERN=""
+if (( EXACT_MATCH )); then
+  SEARCH_PATTERN="$APP_NAME"
+else
+  SEARCH_PATTERN="*$APP_NAME*"
+fi
+color "$BLUE" "Using search pattern: '$SEARCH_PATTERN'"
+
+# Safely read app locations into array using newline separation
+APP_SEARCH_LOCATIONS_ARRAY=()
+while IFS= read -r location; do
+  [[ -n "$location" ]] && APP_SEARCH_LOCATIONS_ARRAY+=("$location")
+done < <(build_app_locations)
+
+color "$BLUE" "🔍 Looking for items related to '$APP_NAME' (pattern: '$SEARCH_PATTERN') in ${#APP_SEARCH_LOCATIONS_ARRAY[@]} locations..."
+FOUND_APP_FILES=()
+
+# Read null-delimited find output into array
+while IFS= read -r -d $'\0' file_match; do
+  if [[ -n "$file_match" ]]; then
+    FOUND_APP_FILES+=("$file_match")
   fi
-fi
+done < <(find_matches "$SEARCH_PATTERN" "${APP_SEARCH_LOCATIONS_ARRAY[@]}")
 
-# Handle interactive mode
-if [ "$INTERACTIVE" -eq 1 ]; then
-  interactive_delete "${FOUND[@]}" # FOUND contains "size|filepath"
-  exit 0 
-fi
+if (( ${#FOUND_APP_FILES[@]} > 0 )); then
+  color "$YELLOW" "⚠️  Found ${#FOUND_APP_FILES[@]} item(s) related to '$APP_NAME':"
+  display_sizes "${FOUND_APP_FILES[@]}"
 
-# Normal deletion path
-read -r -p "$(colorize "$YELLOW" "🧹 Delete all of these files? [y/N]: ")" CONFIRM
-case "$CONFIRM" in
-  [Yy]*) 
-    # Extract file paths from FOUND (which contains "size|filepath" strings)
-    FILE_PATHS_TO_PROCESS=()
-    for entry in "${FOUND[@]}"; do
-      # Extract filepath (part after first '|')
-      FILE_PATHS_TO_PROCESS+=("${entry#*|}")
-    done
-
-    if [ "${#FILE_PATHS_TO_PROCESS[@]}" -eq 0 ]; then
-        colorize "$YELLOW" "❎ No files to process."
-    elif [ "$TRASH_MODE" -eq 1 ]; then
-      move_to_trash "${FILE_PATHS_TO_PROCESS[@]}"
-    else
-      printf '%s\0' "${FILE_PATHS_TO_PROCESS[@]}" \
-        | xargs -0 rm -rf -- \
-        && colorize "$GREEN" "✅ Deleted all items."
-        
-      # Verify deletion
-      REMAINING=0
-      for file_to_check in "${FILE_PATHS_TO_PROCESS[@]}"; do # Check paths we attempted to delete
-        if [ -e "$file_to_check" ]; then
-          ((REMAINING++))
-        fi
-      done
-      
-      if [ "$REMAINING" -gt 0 ]; then
-        colorize "$RED" "⚠️  $REMAINING files could not be deleted (permissions issue)."
+  if (( DRY_RUN )); then
+    perform_delete "${FOUND_APP_FILES[@]}"
+  elif (( INTERACTIVE )); then
+    CONFIRMED_FILES_FOR_DELETION=()
+    local f_path
+    for f_path in "${FOUND_APP_FILES[@]}"; do
+      local item_size
+      item_size=$(du -sh "$f_path" 2>/dev/null | awk '{print $1}' || echo "N/A")
+      local confirm_delete
+      read -r -p "Delete '$f_path' ($item_size)? [y/N] " confirm_delete
+      if [[ "$confirm_delete" =~ ^[Yy]$ ]]; then
+        CONFIRMED_FILES_FOR_DELETION+=("$f_path")
+      else
+        log "Skipping deletion of: $f_path"
       fi
+    done
+    if (( ${#CONFIRMED_FILES_FOR_DELETION[@]} > 0 )); then
+      color "$BLUE" "Proceeding to delete ${#CONFIRMED_FILES_FOR_DELETION[@]} selected item(s)..."
+      perform_delete "${CONFIRMED_FILES_FOR_DELETION[@]}"
+    else
+      color "$YELLOW" "No app-specific items selected for deletion."
     fi
-    ;;
-  *)
-    colorize "$YELLOW" "❎ Deletion cancelled."
-    ;;
-esac
+  else
+    local confirm_batch_delete
+    read -r -p "🧹 Delete all ${#FOUND_APP_FILES[@]} found app-specific item(s) for '$APP_NAME'? [y/N] " confirm_batch_delete
+    if [[ "$confirm_batch_delete" =~ ^[Yy]$ ]]; then
+      perform_delete "${FOUND_APP_FILES[@]}"
+    else
+      color "$YELLOW" "App-specific file deletion skipped by user."
+    fi
+  fi
+else
+  color "$GREEN" "✅ No app-specific files found for '$APP_NAME' with pattern '$SEARCH_PATTERN'."
+fi
+
+# Run general cache cleanup
+color "$BLUE" "ℹ️  Proceeding with general cache cleanup..."
+run_cache_cleanup "$INTERACTIVE"
+
+color "$GREEN" "🎉 All operations complete for '$APP_NAME' and general caches!"
+exit 0
