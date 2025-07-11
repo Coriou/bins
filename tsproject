@@ -109,7 +109,7 @@ npm i -D esbuild eslint concurrently prettier @tsconfig/node20 @types/node
 npm i dotenv
 
 # Create ESLint configuration
-touch .eslintrc.json
+touch .eslintrc.cjs
 cat > .eslintrc.cjs << EOF
 module.exports = {
   env: {
@@ -160,7 +160,7 @@ cat > tsconfig.json << EOF
     "moduleResolution": "node16",
     "resolveJsonModule": true,
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["**/*.ts"],

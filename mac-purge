@@ -109,10 +109,13 @@ find_matches() {
   local search_locations_array=("$@")
   local -a find_command_args=( \( -type f -o -type d -o -type l \) -iname "$pattern_arg" )
 
-  local ex
-  for ex in "${EXCLUDES[@]}"; do
-    find_command_args+=( -not -path "$ex" )
-  done
+  # Fix the unbound variable error when EXCLUDES is empty
+  if [[ ${#EXCLUDES[@]} -gt 0 ]]; then
+    local ex
+    for ex in "${EXCLUDES[@]}"; do
+      find_command_args+=( -not -path "$ex" )
+    done
+  fi
 
   local d
   for d in "${search_locations_array[@]}"; do
@@ -121,6 +124,10 @@ find_matches() {
       continue
     fi
     log "Searching in: $d for pattern: $pattern_arg"
+    # Add debugging output
+    if (( VERBOSE )); then
+      echo "DEBUG: Running find command in $d" >&2
+    fi
     find "$d" -maxdepth 3 "${find_command_args[@]}" -print0 2>/dev/null || true
   done
 }
@@ -280,7 +287,7 @@ clean_brew_cache() {
 
 clean_vs_code_sw() {
   local sw_cache_dir="$HOME/Library/Application Support/Code/Service Worker/CacheStorage"
-  [[ -d "$sw_cache_dir" ]] || { log "VS Code Service Worker cache not found, skipping."; return; }
+  [[ -d "$sw_cache_dir" ]] || { color "$YELLOW" "VS Code Service Worker cache not found, skipping."; return; }
   _clean_op_header "🗑️  Clearing VS Code Service Worker cache"
   if (( DRY_RUN )); then
     _clean_op_dry_run_echo "find \"$sw_cache_dir\" -mindepth 1 -delete"
@@ -302,7 +309,7 @@ clean_general_system_caches() {
   local dir_path
   for dir_path in "${cache_dirs_to_clean[@]}"; do
     if [[ ! -d "$dir_path" ]]; then
-      log "Cache directory not found: $dir_path"
+      color "$YELLOW" "Cache directory not found: $dir_path"
       continue
     fi
     color "$BLUE" "  Targeting directory: $dir_path"
@@ -312,14 +319,14 @@ clean_general_system_caches() {
     else
       find "$dir_path" -mindepth 1 -type f \( -name "*.cache" -o -name "*.tmp" -o -name "*log*" \) -delete 2>/dev/null
       find "$dir_path" -mindepth 1 -type d -empty -delete 2>/dev/null
-      log "Cleaned files in $dir_path."
+      color "$GREEN" "  ✅ Cleaned files in $dir_path."
     fi
   done
 }
 
 clean_spotlight_user_cache() {
   local spotlight_dir="$HOME/Library/Metadata/CoreSpotlight"
-  [[ -d "$spotlight_dir" ]] || { log "CoreSpotlight user cache not found, skipping."; return; }
+  [[ -d "$spotlight_dir" ]] || { color "$YELLOW" "CoreSpotlight user cache not found, skipping."; return; }
   _clean_op_header "🗑️  Clearing CoreSpotlight user metadata cache"
   if (( DRY_RUN )); then
     _clean_op_dry_run_echo "rm -rf \"$spotlight_dir\"/*"
@@ -376,7 +383,7 @@ run_cache_cleanup() {
       if [[ "$confirm_op" =~ ^[Yy]$ ]]; then
         "$op_function_name"
       else
-        log "Skipping: $op_description"
+        color "$YELLOW" "Skipping: $op_description"
       fi
     else
       "$op_function_name"
@@ -431,13 +438,18 @@ done
 
 # ── MAIN ────────────────────────────────────────────────────────────────
 
+echo "DEBUG: Script reached main section" >&2
+echo "DEBUG: CACHE_ONLY=$CACHE_ONLY, APP_NAME='$APP_NAME'" >&2
 log "Script starting with settings: DRY_RUN=$DRY_RUN, VERBOSE=$VERBOSE, INTERACTIVE=$INTERACTIVE, TRASH_MODE=$TRASH_MODE, SUDO_MODE=$SUDO_MODE, EXACT_MATCH=$EXACT_MATCH, CACHE_ONLY=$CACHE_ONLY"
+echo "DEBUG: About to check EXCLUDES array, length=${#EXCLUDES[@]}" >&2
 if (( ${#EXCLUDES[@]} > 0 )); then
   log "Exclusion patterns: ${EXCLUDES[*]}"
 fi
+echo "DEBUG: Finished EXCLUDES check" >&2
 
 # Handle cache-only mode
 if (( CACHE_ONLY )); then
+  echo "DEBUG: Entering cache-only mode" >&2
   if [[ -n "$APP_NAME" ]]; then
     color "$YELLOW" "⚠️  --cache-only is active. Ignoring specified app name: '$APP_NAME'."
   fi
@@ -448,7 +460,9 @@ if (( CACHE_ONLY )); then
 fi
 
 # Handle no app name provided
+echo "DEBUG: Testing APP_NAME condition: [[ -z '$APP_NAME' ]]" >&2
 if [[ -z "$APP_NAME" ]]; then
+  echo "DEBUG: No app name provided, running cache cleanup" >&2
   color "$BLUE" "ℹ️  No application name provided. Running general cache cleanup only."
   run_cache_cleanup "$INTERACTIVE"
   color "$GREEN" "🎉 Cache cleanup complete!"
@@ -472,6 +486,13 @@ while IFS= read -r location; do
 done < <(build_app_locations)
 
 color "$BLUE" "🔍 Looking for items related to '$APP_NAME' (pattern: '$SEARCH_PATTERN') in ${#APP_SEARCH_LOCATIONS_ARRAY[@]} locations..."
+
+# Add debugging
+if (( VERBOSE )); then
+  echo "DEBUG: Search locations:" >&2
+  printf '%s\n' "${APP_SEARCH_LOCATIONS_ARRAY[@]}" >&2
+fi
+
 FOUND_APP_FILES=()
 
 # Read null-delimited find output into array
@@ -480,6 +501,9 @@ while IFS= read -r -d $'\0' file_match; do
     FOUND_APP_FILES+=("$file_match")
   fi
 done < <(find_matches "$SEARCH_PATTERN" "${APP_SEARCH_LOCATIONS_ARRAY[@]}")
+
+# Always show search results (not just in verbose mode)
+echo "Found ${#FOUND_APP_FILES[@]} files matching pattern '$SEARCH_PATTERN'"
 
 if (( ${#FOUND_APP_FILES[@]} > 0 )); then
   color "$YELLOW" "⚠️  Found ${#FOUND_APP_FILES[@]} item(s) related to '$APP_NAME':"

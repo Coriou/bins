@@ -88,7 +88,7 @@ npx --yes create-next-app@latest \
 ########################################
 cd "$PROJECT_PATH"
 echo "Initializing shadcn in: $PROJECT_PATH"
-npx --yes shadcn@latest init -d
+npx --yes shadcn@latest init
 
 ########################################
 # 7. Done!
