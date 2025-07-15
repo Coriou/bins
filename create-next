@@ -90,6 +90,20 @@ cd "$PROJECT_PATH"
 echo "Initializing shadcn in: $PROJECT_PATH"
 npx --yes shadcn@latest init
 
+
+cd "$PROJECT_PATH"
+echo "Removing boilerplate"
+rm -rf "$PROJECT_PATH/src/app/favicon.ico"
+
+rm -rf "$PROJECT_PATH/src/app/page.tsx"
+touch "$PROJECT_PATH/src/app/page.tsx"
+cat > "$PROJECT_PATH/src/app/page.tsx" << EOF
+export default function Home() {
+  return <div className="">$PROJECT_NAME</div>;
+}
+EOF
+
+
 ########################################
 # 7. Done!
 ########################################
