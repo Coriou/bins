@@ -1,0 +1,75 @@
+#!/usr/bin/env zsh
+# voice-enhance — convert audio to clean, normalized OGG (Vorbis), voice-optimized for STT
+# Usage: voice-enhance [-f] /path/to/input.wav
+# Env overrides: QUALITY (default 5), SAMPLE_RATE (48000), CHANNELS (1)
+
+set -euo pipefail
+
+QUALITY=${QUALITY:-5}        # Vorbis VBR quality (0–10). ~5 ≈ ~160 kbps
+SAMPLE_RATE=${SAMPLE_RATE:-48000}
+CHANNELS=${CHANNELS:-1}
+FORCE=0
+
+usage() {
+  echo "Usage: $(basename "$0") [-f] <input audio file>"
+  echo "  -f    overwrite existing .ogg"
+  exit 1
+}
+
+[[ $# -lt 1 ]] && usage
+if [[ "$1" == "-f" ]]; then FORCE=1; shift; fi
+
+in="$1"
+[[ -f "$in" ]] || { echo "❌ File not found: $in"; exit 1; }
+
+# Tools check
+for tool in ffmpeg jq; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "❌ Missing dependency: $tool"
+    echo "   Install on macOS with: brew install $tool"
+    exit 1
+  fi
+done
+
+# Output path: same folder, .ogg extension
+ext="${in##*.}"
+out="${in%.$ext}.ogg"
+if [[ -f "$out" && $FORCE -ne 1 ]]; then
+  echo "✅ OGG already exists: $(basename "$out") (use -f to overwrite)"
+  exit 0
+fi
+
+echo "🔊 Pass 1/2: analyzing loudness…"
+json=$(
+  ffmpeg -hide_banner -nostats -i "$in" \
+    -af loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json -f null - 2>&1 \
+    | awk '/^\s*{/{f=1} f{print} /^\s*}/{if(f){exit}}'
+)
+
+[[ -n "${json:-}" ]] || { echo "❌ Could not capture loudnorm analysis."; exit 1; }
+
+I=$(jq -r '.input_i'      <<<"$json")
+LRA=$(jq -r '.input_lra'  <<<"$json")
+TP=$(jq -r '.input_tp'    <<<"$json")
+THRESH=$(jq -r '.input_thresh' <<<"$json")
+OFFSET=$(jq -r '.target_offset' <<<"$json")
+
+if [[ -z "$I" || "$I" == "null" || -z "$OFFSET" || "$OFFSET" == "null" ]]; then
+  echo "❌ Failed to parse loudnorm parameters."
+  exit 1
+fi
+
+filters="loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=${I}:measured_LRA=${LRA}:measured_tp=${TP}:measured_thresh=${THRESH}:offset=${OFFSET},highpass=f=80,lowpass=f=8000,compand=attacks=0.3:decays=1.0:points=-80/-80|-45/-15|-27/-9|-25/-7|-23/-5|-20/-2|-10/0,silenceremove=start_periods=1:stop_periods=0:stop_duration=0.9:stop_threshold=-50dB:start_threshold=-40dB"
+
+echo "🎙️ Pass 2/2: applying normalization + voice cleanup, encoding OGG…"
+ffmpeg -hide_banner -i "$in" -af "$filters" \
+  -ar "$SAMPLE_RATE" -ac "$CHANNELS" -qscale:a "$QUALITY" \
+  -y "$out"
+
+if [[ -f "$out" ]]; then
+  size=$(du -h "$out" | awk '{print $1}')
+  echo "✅ Done: $out ($size)"
+else
+  echo "❌ Conversion failed."
+  exit 1
+fi
