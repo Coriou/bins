@@ -1,55 +1,99 @@
 #!/usr/bin/env bash
 
 # create-next.sh
-# 
-# Description:
-#   Automate the creation of a Next.js project using create-next-app, then set it
-#   up with shadcn UI. Uses a slug-ified version of the provided project name.
+#
+# Opinionated Next.js 15+ starter:
+# - TypeScript, Tailwind, ESLint, src/, App Router, @/* alias
+# - shadcn/ui initialized with a minimal core set of components
+# - MCP + VS Code setup
+# - Dev container + production-ready Dockerfile (standalone)
+# - next.config.ts tuned for prod & React Compiler
 #
 # Usage:
 #   ./create-next.sh "My Cool Project"
 #
 # Requirements:
 #   - bash
-#   - npx (Node.js + npm)
-#   - iconv (commonly available on macOS and Linux)
+#   - Node.js 18.17+ (20+ recommended)
+#   - npm
+#   - iconv (for slugify, usually installed by default)
 #
-# Note: This script assumes you have a directory "$HOME/Projects" where you keep your code.
-#
+# You can override the default projects directory via:
+#   export PROJECTS_PATH="/path/to/code"
+#   ./create-next.sh "My App"
 
 set -euo pipefail
 
-PROJECTS_PATH="$HOME/Projects"
+########################################
+# 0. Base Config
+########################################
 
-########################################
-# 1. Input Validation
-########################################
+PROJECTS_PATH="${PROJECTS_PATH:-"$HOME/Projects"}"
+
 if [ $# -lt 1 ]; then
   echo "Usage: $0 <project_name>"
   exit 1
 fi
 
 ########################################
-# 2. Slugify Helper
-#
-#    Takes the raw project name, removes
-#    special characters, converts it to
-#    lowercase, and sets global variables
-#    PROJECT_NAME and PROJECT_PATH.
+# 1. Slugify Helper
 ########################################
 slugify() {
   local raw_name="$*"
-  PROJECT_NAME="$(echo "$raw_name" \
-    | iconv -t ascii//TRANSLIT \
-    | sed -E 's/[~\^]+//g' \
-    | sed -E 's/[^a-zA-Z0-9]+/-/g' \
-    | sed -E 's/^-+|-+$//g' \
-    | tr '[:upper:]' '[:lower:]'
-  )"
+
+  if command -v iconv >/dev/null 2>&1; then
+    PROJECT_NAME="$(echo "$raw_name" \
+      | iconv -t ascii//TRANSLIT \
+      | sed -E 's/[~\^]+//g' \
+      | sed -E 's/[^a-zA-Z0-9]+/-/g' \
+      | sed -E 's/^-+|-+$//g' \
+      | tr '[:upper:]' '[:lower:]'
+    )"
+  else
+    # Fallback without iconv: basic ASCII slug
+    PROJECT_NAME="$(echo "$raw_name" \
+      | sed -E 's/[^a-zA-Z0-9]+/-/g' \
+      | sed -E 's/^-+|-+$//g' \
+      | tr '[:upper:]' '[:lower:]'
+    )"
+  fi
+
   PROJECT_PATH="${PROJECTS_PATH}/${PROJECT_NAME}"
 }
 
 slugify "$*"
+
+########################################
+# 2. Fetch Current Active Node LTS Major Version
+########################################
+NODE_LTS=""
+
+fetch_node_lts() {
+  if command -v node >/dev/null 2>&1 && command -v npx >/dev/null 2>&1; then
+    # Do not allow failure here to abort the script; we have a fallback
+    local fetched
+    fetched="$(npx --yes -p node-lts-versions node -e "
+      const { getNodeLTS } = require('node-lts-versions');
+      (async () => {
+        const ltsv = new getNodeLTS();
+        await ltsv.fetchLTS();
+        const active = ltsv.json('active');
+        const latest = active[active.length - 1];
+        console.log(latest || '22');
+      })();
+    " 2>/dev/null || true)"
+
+    if [ -n "${fetched:-}" ]; then
+      NODE_LTS="$fetched"
+    fi
+  fi
+
+  # Sensible fallback (late 2025+): Node 22
+  NODE_LTS="${NODE_LTS:-22}"
+  echo "Using Node LTS major: $NODE_LTS"
+}
+
+fetch_node_lts
 
 ########################################
 # 3. Ensure $PROJECTS_PATH Exists
@@ -68,44 +112,354 @@ if [ -d "$PROJECT_PATH" ]; then
 fi
 
 ########################################
-# 5. Create the Next.js App
+# 5. Create the Next.js App (Next.js 15+)
 ########################################
 cd "$PROJECTS_PATH"
 
-npx --yes create-next-app@latest \
+echo "Creating new Next.js project: $PROJECT_NAME"
+
+# Only use supported flags; rely on next.config.ts to enable React Compiler.
+npx --yes create-next-app@latest "$PROJECT_NAME" \
   --ts \
   --tailwind \
   --eslint \
   --src-dir \
   --app \
-  --turbopack \
   --import-alias "@/*" \
   --use-npm \
-  "$PROJECT_NAME"
-
-########################################
-# 6. Install / Initialize shadcn
-########################################
-cd "$PROJECT_PATH"
-echo "Initializing shadcn in: $PROJECT_PATH"
-npx --yes shadcn@latest init
-
+  --yes
 
 cd "$PROJECT_PATH"
-echo "Removing boilerplate"
-rm -rf "$PROJECT_PATH/src/app/favicon.ico"
 
-rm -rf "$PROJECT_PATH/src/app/page.tsx"
-touch "$PROJECT_PATH/src/app/page.tsx"
+########################################
+# 6. Initialize shadcn/ui (v2+)
+########################################
+echo "Initializing shadcn/ui..."
+npx --yes shadcn@latest init -y
+
+echo "Installing all shadcn/ui components..."
+npx --yes shadcn@latest add --all -y
+
+########################################
+# 7. Cleanup + Minimal Starter Page
+########################################
+echo "Cleaning boilerplate..."
+
+rm -f "$PROJECT_PATH/src/app/favicon.ico" 2>/dev/null || true
+rm -f "$PROJECT_PATH/src/app/page.tsx" 2>/dev/null || true
+
 cat > "$PROJECT_PATH/src/app/page.tsx" << EOF
+import { Button } from "@/components/ui/button";
+
 export default function Home() {
-  return <div className="">$PROJECT_NAME</div>;
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center gap-6 bg-background text-foreground">
+      <h1 className="text-3xl font-semibold tracking-tight">
+        ${PROJECT_NAME}
+      </h1>
+      <p className="text-muted-foreground">
+        Next.js + shadcn/ui starter. Ready for prod.
+      </p>
+      <Button size="lg">
+        Get started
+      </Button>
+    </main>
+  );
 }
 EOF
 
+########################################
+# 8. Global Coding-Agent Instructions + MCP config
+########################################
+echo "Adding global agent instructions and MCP config..."
+
+mkdir -p "$PROJECT_PATH/.github/instructions"
+cat > "$PROJECT_PATH/.github/instructions/global.instructions.md" << 'EOF'
+---
+applyTo: "**/*.{ts,tsx,js,jsx}"
+---
+
+- Always use shadcn's component when they exist
+- Always use shadcn's MCP server for up-to-date components documentation and examples
+- Use Context7's MCP server for specific documentation for libraries used in this project
+- Use playwright MCP server for interacting with the app via a browser
+- In production, this app runs in a Docker container on my Coolify instance, deployed as a standalone Next.js app
+- Always optimize for performance and best practices
+- Make sure everything is efficient; do not over-engineer anything
+- Keep the code clear, simple and readable
+- Do not use emojis; use either Tabler or Lucide icons instead
+- Use Tailwind CSS for styling; no custom CSS unless absolutely necessary
+- Use shadcn's design tokens and Tailwind config for colors, spacing, fonts, etc.
+- Write clear and concise comments where necessary
+- Always use absolute imports with "@" (e.g., "@/app/...") instead of relative imports for consistency and maintainability
+- Use regular JS/TS camelCase for component and variable names; do not use kebab-case or snake_case
+- Use "use client" directive only when necessary for client-side components, optimising components for SSR when possible
+- Do not write new components to the /src/components/ui/ directory as this is dedicated to shadcn's components only. Create new components in appropriate feature directories instead
+- Use tailwind semantic color names from the design system (e.g., text-primary, bg-secondary) instead of hardcoding colors (e.g., text-blue-500, bg-red-200) to ensure consistency with the design system and easy theming.
+EOF
+
+mkdir -p "$PROJECT_PATH/.vscode"
+cat > "$PROJECT_PATH/.vscode/mcp.json" << 'EOF'
+{
+  "servers": {
+    "shadcn": {
+      "command": "npx",
+      "args": [
+        "shadcn@latest",
+        "mcp"
+      ],
+      "type": "stdio"
+    },
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": ""
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp@latest",
+        "--user-data-dir=.vscode/playwright-data",
+        "--save-session"
+      ]
+    }
+  },
+  "inputs": []
+}
+EOF
+
+cat > "$PROJECT_PATH/.vscode/settings.json" << 'EOF'
+{
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "eslint.validate": [
+    "javascript",
+    "javascriptreact",
+    "typescript",
+    "typescriptreact"
+  ],
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "tailwindCSS.includeLanguages": {
+    "typescript": "javascript",
+    "typescriptreact": "javascriptreact"
+  },
+  "files.exclude": {
+    "**/.next": true,
+    "**/node_modules": true
+  },
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": true
+  },
+  "editor.rulers": [80]
+}
+EOF
+
+cat > "$PROJECT_PATH/.vscode/extensions.json" << 'EOF'
+{
+  "recommendations": [
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "bradlc.vscode-tailwindcss",
+    "ms-playwright.playwright",
+    "eamodio.gitlens"
+  ]
+}
+EOF
 
 ########################################
-# 7. Done!
+# 9. Dev Container (reproducible Node env)
 ########################################
-echo "Project '${PROJECT_NAME}' successfully created at: ${PROJECT_PATH}"
-code .
+echo "Creating devcontainer.json..."
+
+mkdir -p "$PROJECT_PATH/.devcontainer"
+cat > "$PROJECT_PATH/.devcontainer/devcontainer.json" << EOF
+{
+  "name": "Next.js Dev Container (Node ${NODE_LTS})",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-${NODE_LTS}-bookworm",
+  "forwardPorts": [3000],
+  "postCreateCommand": "npm install",
+  "postStartCommand": "npm run dev",
+  "remoteUser": "node",
+  "features": {},
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "bradlc.vscode-tailwindcss",
+        "ms-playwright.playwright",
+        "eamodio.gitlens"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "editor.formatOnSave": true
+      }
+    }
+  }
+}
+EOF
+
+########################################
+# 10. Initialize shadcn MCP for VS Code (non-fatal)
+########################################
+if npx --yes shadcn@latest mcp init --client vscode >/dev/null 2>&1; then
+  echo "shadcn MCP initialized for VS Code."
+else
+  echo "Warning: shadcn MCP initialization failed. You can run:"
+  echo "  npx --yes shadcn@latest mcp init --client vscode"
+fi
+
+########################################
+# 11. .nvmrc (major only) + .gitignore
+########################################
+echo "Writing Node version to .nvmrc..."
+if command -v node >/dev/null 2>&1; then
+  node -v | sed -E 's/^v([0-9]+).*/\1/' > "$PROJECT_PATH/.nvmrc"
+else
+  echo "$NODE_LTS" > "$PROJECT_PATH/.nvmrc"
+fi
+
+echo "Creating .gitignore..."
+cat > "$PROJECT_PATH/.gitignore" << 'EOF'
+.next/
+node_modules/
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.vscode/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-lock.yaml
+EOF
+
+########################################
+# 12. Production Dockerfile (Next.js standalone)
+########################################
+echo "Creating Dockerfile..."
+
+cat > "$PROJECT_PATH/Dockerfile" << EOF
+# syntax=docker/dockerfile:1.7
+
+FROM node:${NODE_LTS}-bookworm-slim AS base
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+WORKDIR /app
+
+FROM node:${NODE_LTS}-bookworm-slim AS deps
+ENV NODE_ENV=development
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --prefer-offline --no-audit
+
+FROM node:${NODE_LTS}-bookworm-slim AS builder
+ENV NODE_ENV=development NEXT_TELEMETRY_DISABLED=1
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN --mount=type=cache,target=/app/.next/cache npm run build
+
+FROM node:${NODE_LTS}-bookworm-slim AS runner
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
+WORKDIR /app
+
+# Create non-root user
+RUN groupadd --system --gid 1001 nodejs \
+  && useradd --system --uid 1001 --gid nodejs nextjs
+
+# Copy standalone output
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+
+USER nextjs
+EXPOSE 3000
+CMD ["node", "server.js"]
+EOF
+
+########################################
+# 13. next.config.ts (prod-focused)
+########################################
+echo "Creating next.config.ts..."
+
+cat > "$PROJECT_PATH/next.config.ts" << 'EOF'
+import type { NextConfig } from "next";
+
+/**
+ * Generate a unique build ID for version skew detection.
+ * Priority:
+ * 1. Git commit SHA (CI/CD / Coolify).
+ * 2. Timestamp-based fallback for local builds.
+ */
+const generateBuildId = async (): Promise<string> => {
+  const gitSha =
+    process.env.COOLIFY_GIT_COMMIT_SHA ||
+    process.env.GITHUB_SHA ||
+    process.env.GIT_SHA ||
+    process.env.GIT_COMMIT;
+
+  if (gitSha) {
+    return gitSha.substring(0, 12);
+  }
+
+  return `build-${Date.now()}`;
+};
+
+const nextConfig: NextConfig = {
+  generateBuildId,
+  reactCompiler: true,
+  output: "standalone",
+  poweredByHeader: false,
+  compress: true,
+  serverExternalPackages: [],
+  outputFileTracingIncludes: {},
+  images: {
+    remotePatterns: [
+      {
+        protocol: "https",
+        hostname: "*.digitaloceanspaces.com"
+      }
+    ]
+  },
+  experimental: {
+    serverActions: {
+      bodySizeLimit: "50mb"
+    }
+  }
+};
+
+export default nextConfig;
+EOF
+
+########################################
+# 13.b Required for React Compiler
+########################################
+echo "Installing React Compiler..."
+npm install babel-plugin-react-compiler
+
+########################################
+# 14. Optional: Git Initialization
+########################################
+if [ ! -d "$PROJECT_PATH/.git" ]; then
+  echo "Initializing git repository..."
+  cd "$PROJECT_PATH"
+  git init -q
+  git add .
+  git commit -m "Initial commit" -q
+fi
+
+########################################
+# 15. Done
+########################################
+echo "✅ Project '${PROJECT_NAME}' successfully created at: ${PROJECT_PATH}"
+
+if command -v code >/dev/null 2>&1; then
+  echo "🚀 Opening in VS Code..."
+  code "$PROJECT_PATH"
+else
+  echo "ℹ️ VS Code 'code' CLI not found. Open the folder manually in VS Code:"
+  echo "   ${PROJECT_PATH}"
+fi
