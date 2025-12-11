@@ -1,150 +1,482 @@
 #!/bin/bash
 
-PROJECT_PATH="${HOME}/Projects/_python/"
-JUPYTER=false
+set -euo pipefail
 
-while test $# -gt 0; do
-  case "$1" in
-    -j|--jupyter)
-      shift
-      JUPYTER=true
-      break
-      ;;
-      *)
-      break
-      ;;
-  esac
+########################################
+# Defaults
+########################################
+
+DEFAULT_PROJECTS_PATH="${HOME}/Projects/"
+PYTHON_VERSION_DEFAULT="3.12"
+
+########################################
+# Slugify project name
+########################################
+slugName() {
+	PROJECT_NAME_RAW="$*"
+	PROJECT_NAME=$(
+		echo "$PROJECT_NAME_RAW" \
+			| iconv -t ascii//TRANSLIT \
+			| sed -E 's/[~\^]+//g' \
+			| sed -E 's/[^a-zA-Z0-9]+/-/g' \
+			| sed -E 's/^-+|-+$//g' \
+			| tr 'A-Z' 'a-z'
+	)
+	PROJECT_PATH="${OUTPUT_PATH}${PROJECT_NAME}"
+}
+
+########################################
+# Parse args (supports options before/after project name)
+########################################
+OUTPUT_PATH=""
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-o|--output)
+		if [ -z "${2-}" ]; then
+			echo "Error: $1 requires an argument" 1>&2
+			exit 1
+		fi
+		OUTPUT_PATH="$2"
+		shift 2
+		;;
+	--)
+		shift
+		while [ $# -gt 0 ]; do
+			POSITIONAL+=("$1")
+			shift
+		done
+		;;
+	-*)
+		echo "Invalid option: $1" 1>&2
+		exit 1
+		;;
+	*)
+		POSITIONAL+=("$1")
+		shift
+		;;
+	esac
 done
 
-slugName() {
-    PROJECT_NAME=$(echo "$@" | iconv -t ascii//TRANSLIT | sed -E 's/[~\^]+//g' | sed -E 's/[^a-zA-Z0-9]+/-/g' | sed -E 's/^-+\|-+$//g' | tr A-Z a-z)
-    # PROJECT_PATH="${PROJECTS_PATH}${PROJECT_NAME}"
-}
+set -- "${POSITIONAL[@]}"
+shift 0 || true
 
-slugName $1
-
-mkdir -p "${PROJECT_PATH}${PROJECT_NAME}"
-
-cd "${PROJECT_PATH}${PROJECT_NAME}"
-
-python3 -m venv ".${PROJECT_NAME}-env"
-
-source ".${PROJECT_NAME}-env/bin/activate"
-
-if $JUPYTER
-then
-	pip install jupyterlab
+########################################
+# Validate project name & paths
+########################################
+if [ -z "${1-}" ]; then
+	echo "Please provide a project name."
+	exit 1
 fi
 
-cat > "${PROJECT_NAME}.sublime-project" << EOF
-{
-	"build_systems":
-	[
-		{
-			"file_regex": "^[ ]*File \"(...*?)\", line ([0-9]*)",
-			"name": "Anaconda Python Builder",
-			"selector": "source.python",
-			"shell_cmd": "${PROJECT_PATH}${PROJECT_NAME}/.${PROJECT_NAME}-env/bin/python -u \"\$file\""
-		}
-	],
-	"folders":
-	[
-		{
-			"path": "."
-		}
-	],
-	"settings": {
-		"python_interpreter": "${PROJECT_PATH}${PROJECT_NAME}/.${PROJECT_NAME}-env/bin/python"
-	}
-}
-EOF
+OUTPUT_PATH=${OUTPUT_PATH:-$DEFAULT_PROJECTS_PATH}
+case "$OUTPUT_PATH" in
+	*/) ;; # ok
+	*) OUTPUT_PATH="$OUTPUT_PATH/" ;;
+esac
 
-cat > "${PROJECT_NAME}.sublime-workspace" << EOF
-{
-	"build_system": "Anaconda Python Builder",
-	"menu_visible": true,
-	"project": "${PROJECT_NAME}.sublime-project",
-	"save_all_on_build": true,
-	"show_minimap": false
-}
-EOF
+slugName "$1"
 
-touch main.py
+if [ -d "${PROJECT_PATH}" ]; then
+	echo "There's already something at ${PROJECT_PATH}, please create a project with a different name."
+	exit 1
+fi
 
-cat > readme.md << EOF
-# ${1}
-EOF
+mkdir -p "${PROJECT_PATH}"
 
+if [ -d "${PROJECT_PATH}" ]; then
+	echo "Created a new directory at ${PROJECT_PATH}"
+else
+	echo "Could not create ${PROJECT_PATH}"
+	exit 1
+fi
+
+cd "${PROJECT_PATH}"
+
+########################################
+# Derived names
+########################################
+# Python package name: hyphens -> underscores
+PACKAGE_NAME="${PROJECT_NAME//-/_}"
+PYTHON_VERSION="${PYTHON_VERSION_DEFAULT}"
+
+########################################
+# .gitignore
+########################################
 cat > .gitignore << EOF
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
+
+# Virtual environments
+.venv/
+.env/
+.envrc
+
+# Distribution / packaging
 build/
-develop-eggs/
 dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
 *.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-*.manifest
-*.spec
-pip-log.txt
-pip-delete-this-directory.txt
-htmlcov/
-.tox/
-.nox/
+
+# Testing / coverage
 .coverage
+htmlcov/
 .coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
+.cache/
 .pytest_cache/
-cover/
-*.mo
-*.pot
+
+# Mypy / Ruff
+.mypy_cache/
+.ruff_cache/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
 *.log
-local_settings.py
-db.sqlite3
-db.sqlite3-journal
-instance/
-.webassets-cache
-.scrapy
-docs/_build/
-.pybuilder/
-target/
-.ipynb_checkpoints
-profile_default/
-ipython_config.py
-__pypackages__/
-celerybeat-schedule
-celerybeat.pid
-*.sage.py
-.*-env
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
 EOF
 
-git init
+########################################
+# README
+########################################
+cat > README.md << EOF
+# ${PROJECT_NAME}
 
-subl . --project "${PROJECT_NAME}.sublime-project"
-open .
+New Python project bootstrapped with:
+
+- Python ${PYTHON_VERSION}
+- src/ layout
+- \`ruff\` (lint + format)
+- \`mypy\` (typing)
+- \`pytest\` (tests)
+- Devcontainer for an isolated, reproducible environment
+EOF
+
+########################################
+# .python-version (pyenv / tooling hint)
+########################################
+echo "${PYTHON_VERSION}" > .python-version
+
+########################################
+# EditorConfig
+########################################
+cat > .editorconfig << 'EOF'
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.py]
+indent_style = space
+indent_size = 4
+EOF
+
+########################################
+# Basic env files
+########################################
+cat > .env.example << 'EOF'
+# Example environment variables
+APP_ENV=development
+LOG_LEVEL=INFO
+EOF
+
+cp .env.example .env
+
+########################################
+# Requirements
+########################################
+cat > requirements.txt << 'EOF'
+# Runtime dependencies go here, for example:
+# requests>=2.32.0
+EOF
+
+cat > requirements-dev.txt << 'EOF'
+-r requirements.txt
+
+# Tooling
+ruff
+mypy
+pytest
+pytest-cov
+python-dotenv
+EOF
+
+########################################
+# pyproject.toml (tooling config)
+########################################
+cat > pyproject.toml << EOF
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "${PROJECT_NAME}"
+version = "0.1.0"
+description = "New Python project"
+authors = [{ name = "", email = "" }]
+requires-python = ">=${PYTHON_VERSION}"
+readme = "README.md"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "ruff",
+  "mypy",
+  "pytest",
+  "pytest-cov",
+  "python-dotenv"
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+strict_equality = true
+pretty = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-ra"
+testpaths = ["tests"]
+EOF
+
+########################################
+# Source layout
+########################################
+mkdir -p "src/${PACKAGE_NAME}" tests
+
+cat > "src/${PACKAGE_NAME}/__init__.py" << EOF
+\"\"\"${PROJECT_NAME} package.\"\"\"
+__all__ = []
+EOF
+
+cat > "src/${PACKAGE_NAME}/main.py" << 'EOF'
+from __future__ import annotations
+
+import logging
+import os
+
+
+def configure_logging() -> None:
+	log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+	logging.basicConfig(
+		level=log_level,
+		format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+	)
+
+
+def main() -> None:
+	configure_logging()
+	logging.getLogger(__name__).info("Hello from your new Python project!")
+
+
+if __name__ == "__main__":
+	main()
+EOF
+
+cat > tests/test_example.py << EOF
+from ${PACKAGE_NAME}.main import main
+
+
+def test_main_runs() -> None:
+	# Smoke test: just ensure it doesn't raise.
+	main()
+EOF
+
+########################################
+# VS Code config (Python + Ruff)
+########################################
+mkdir -p .vscode
+
+cat > .vscode/settings.json << 'EOF'
+{
+  "python.defaultInterpreterPath": ".venv/bin/python",
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": ["tests"],
+  "python.analysis.typeCheckingMode": "strict",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll": "always"
+  },
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.mypy_cache": true,
+    "**/.ruff_cache": true
+  }
+}
+EOF
+
+cat > .vscode/extensions.json << 'EOF'
+{
+  "recommendations": [
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "charliermarsh.ruff"
+  ]
+}
+EOF
+
+# Optional: MCP config (same style as your TS setups)
+cat > .vscode/mcp.json << 'EOF'
+{
+  "servers": {
+    "context7": {
+      "type": "http",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": ""
+      }
+    }
+  },
+  "inputs": []
+}
+EOF
+
+########################################
+# Dev Container (reproducible Python env)
+########################################
+mkdir -p .devcontainer
+
+cat > .devcontainer/devcontainer.json << EOF
+{
+  "name": "Python Dev Container (Python ${PYTHON_VERSION})",
+  "image": "mcr.microsoft.com/devcontainers/python:${PYTHON_VERSION}",
+  "remoteUser": "vscode",
+  "features": {},
+  "postCreateCommand": "python -m venv .venv && . .venv/bin/activate && pip install --upgrade pip && pip install -r requirements-dev.txt",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": ".venv/bin/python",
+        "editor.formatOnSave": true,
+        "editor.codeActionsOnSave": {
+          "source.fixAll": "always"
+        }
+      }
+    }
+  }
+}
+EOF
+
+########################################
+# GitHub Actions (CI: lint + typecheck + tests)
+########################################
+mkdir -p .github/workflows
+
+cat > .github/workflows/ci.yml << EOF
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '${PYTHON_VERSION}'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Typecheck (mypy)
+        run: mypy src
+
+      - name: Tests (pytest)
+        run: pytest --cov=src --cov-report=term-missing
+EOF
+
+########################################
+# Pre-commit hooks (optional but ready)
+########################################
+cat > .pre-commit-config.yaml << 'EOF'
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.6.8
+    hooks:
+      - id: ruff
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.2
+    hooks:
+      - id: mypy
+        additional_dependencies: []
+EOF
+
+########################################
+# Try to create local venv (non-invasive)
+########################################
+if command -v python3 >/dev/null 2>&1; then
+	echo "Creating local virtualenv (.venv) with python3..."
+	python3 -m venv .venv
+	# Best-effort install dev deps locally without touching system Python
+	# (safe to skip if something goes wrong)
+	if [ -f "requirements-dev.txt" ]; then
+		# shellcheck disable=SC1091
+		. .venv/bin/activate
+		pip install --upgrade pip || true
+		pip install -r requirements-dev.txt || true
+		deactivate || true
+	fi
+else
+	echo "python3 not found on host; skipping local virtualenv creation. Use the devcontainer instead."
+fi
+
+########################################
+# Git init
+########################################
+git init >/dev/null 2>&1 || true
+
+########################################
+# Open in VS Code if available
+########################################
+if command -v code >/dev/null 2>&1; then
+	code .
+fi
+
+echo "✅ Python project '${PROJECT_NAME}' ready at: ${PROJECT_PATH}"
+echo "   - Recommended: open in VS Code and reopen in container (Dev Containers)."
+echo "   - Or locally:   source .venv/bin/activate && pytest"
