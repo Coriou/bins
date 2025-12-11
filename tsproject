@@ -1,69 +1,77 @@
 #!/bin/bash
+set -euo pipefail
 
 # Default project path
 DEFAULT_PROJECTS_PATH="${HOME}/Projects/"
 
 # Function to create a slug from the project name
 slugName() {
-    PROJECT_NAME=$(echo "$@" | iconv -t ascii//TRANSLIT | sed -E 's/[~\^]+//g' | sed -E 's/[^a-zA-Z0-9]+/-/g' | sed -E 's/^-+\|-+$//g' | tr A-Z a-z)
-    PROJECT_PATH="${OUTPUT_PATH}${PROJECT_NAME}"
+	PROJECT_NAME="$(
+		echo "$*" \
+			| iconv -t ascii//TRANSLIT 2>/dev/null \
+			| sed -E 's/[~\^]+//g' \
+			| sed -E 's/[^a-zA-Z0-9]+/-/g' \
+			| sed -E 's/^-+|-+$//g' \
+			| tr 'A-Z' 'a-z'
+	)"
+	PROJECT_PATH="${OUTPUT_PATH}${PROJECT_NAME}"
 }
 
 # Parse command line arguments (supports options before or after project name)
 OUTPUT_PATH=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
-  case "$1" in
-    -o|--output)
-      if [ -z "$2" ]; then
-        echo "Error: $1 requires an argument" 1>&2
-        exit 1
-      fi
-      OUTPUT_PATH=$2
-      shift 2
-      ;;
-    --)
-      shift
-      while [ $# -gt 0 ]; do
-        POSITIONAL+=("$1")
-        shift
-      done
-      ;;
-    -* )
-      echo "Invalid option: $1" 1>&2
-      exit 1
-      ;;
-    * )
-      POSITIONAL+=("$1")
-      shift
-      ;;
-  esac
+	case "$1" in
+	-o|--output)
+		if [ "${2-}" = "" ]; then
+			echo "Error: $1 requires an argument" 1>&2
+			exit 1
+		fi
+		OUTPUT_PATH=$2
+		shift 2
+		;;
+	--)
+		shift
+		while [ $# -gt 0 ]; do
+			POSITIONAL+=("$1")
+			shift
+		done
+		;;
+	-*)
+		echo "Invalid option: $1" 1>&2
+		exit 1
+		;;
+	*)
+		POSITIONAL+=("$1")
+		shift
+		;;
+	esac
 done
 
 # Restore positional parameters
 set -- "${POSITIONAL[@]}"
-shift 0
+# shift 0 is a no-op, so we skip it
 
 # Set output path or use default
 OUTPUT_PATH=${OUTPUT_PATH:-$DEFAULT_PROJECTS_PATH}
 # Ensure OUTPUT_PATH ends with a slash
 case "$OUTPUT_PATH" in
-  */) ;; # ok
-  *) OUTPUT_PATH="$OUTPUT_PATH/" ;;
+	*/) ;; # ok
+	*) OUTPUT_PATH="$OUTPUT_PATH/" ;;
 esac
 
 # Validate and slugify project name
-if [ -z "$1" ]; then
-  echo "Please provide a project name."
-  exit 1
+if [ -z "${1-}" ]; then
+	echo "Please provide a project name."
+	exit 1
 fi
 
-slugName $1
+slugName "$1"
 
 # Check if project directory already exists
 if [ -d "${PROJECT_PATH}" ]; then
-  echo "There's already something at ${PROJECT_PATH}, please create a project with a different name."
-  exit 1
+	echo "There's already something at ${PROJECT_PATH}, please create a project with a different name."
+	exit 1
 fi
 
 # Create project directory
@@ -71,16 +79,36 @@ mkdir -p "${PROJECT_PATH}"
 
 # Check if directory was created successfully
 if [ -d "${PROJECT_PATH}" ]; then
-  echo "Created a new directory at ${PROJECT_PATH}"
+	echo "Created a new directory at ${PROJECT_PATH}"
 else
-  echo "Could not create ${PROJECT_PATH}"
-  exit 1
+	echo "Could not create ${PROJECT_PATH}"
+	exit 1
 fi
 
 # Change to project directory
 cd "${PROJECT_PATH}"
 
+########################################
+# Node version detection (for .nvmrc + CI)
+########################################
+if ! command -v node >/dev/null 2>&1; then
+	echo "Error: Node.js is required but not installed."
+	exit 1
+fi
+
+NODE_VERSION_RAW="$(node -v)"
+NODE_MAJOR="$(echo "$NODE_VERSION_RAW" | sed -E 's/^v([0-9]+).*/\1/')"
+
+########################################
+# Dev Container Node version (stable LTS only)
+########################################
+# Microsoft devcontainers only support Node LTS: 18, 20, 22 (as of 2025)
+# Node 24/25 etc. do NOT exist as devcontainer images.
+DEVCONTAINER_NODE_LTS="22"
+
+########################################
 # Create configuration files
+########################################
 cat > .prettierrc << EOF
 {
   "useTabs": true,
@@ -93,6 +121,7 @@ cat > .gitignore << EOF
 node_modules
 dist
 .env
+.env.local
 .cache
 .log
 EOF
@@ -102,30 +131,25 @@ cat > readme.md << EOF
 EOF
 
 # Initialize Node project
-node -v > .nvmrc
-[ ! -f "package.json" ] && npm init -y
+echo "${NODE_MAJOR}" > .nvmrc
+if [ ! -f "package.json" ]; then
+	npm init -y
+fi
 
 # Modify package.json
-node -p "JSON.stringify(Object.assign(require('./package.json'), {
-  main: '',
-  type: 'module',
-  scripts: {
-    'build-file': 'esbuild --bundle --outdir=dist --platform=node --format=esm --packages=external',
-    'start': 'npm run build-file ./src/index.ts && node ./dist/index.js',
-    'dev': 'concurrently --raw \"npm:dev:*\"',
-    'dev:build': 'npm run build-file -- --watch=forever ./src/index.ts',
-    'dev:run': 'node --watch \"./dist/index.js\"',
-    'lint': 'eslint --ext .ts src',
-    'format': 'prettier --write .',
-    'typecheck': 'tsc --noEmit'
-  },
-  author: '',
-  license: 'ISC'
-}), null, 2);" > package_tmp.json
+node -p "const pkg=require('./package.json'); pkg.main=''; pkg.type='module'; pkg.scripts={
+  \"build-file\": \"esbuild ./src/index.ts --bundle --outdir=dist --platform=node --format=esm --packages=external\",
+  \"start\": \"npm run build-file && node ./dist/index.js\",
+  \"dev\": \"concurrently --raw \\\"npm:dev:*\\\"\",
+  \"dev:build\": \"npm run build-file -- --watch=forever\",
+  \"dev:run\": \"node --watch ./dist/index.js\",
+  \"lint\": \"eslint --ext .ts src\",
+  \"format\": \"prettier --write .\",
+  \"typecheck\": \"tsc --noEmit\"
+}; JSON.stringify(pkg,null,2)" > package_tmp.json
 
 mkdir -p src src/utils
 
-# Replace package.json with modified version
 rm package.json
 mv package_tmp.json package.json
 
@@ -134,7 +158,6 @@ npm i -D esbuild typescript eslint concurrently prettier @eslint/js @tsconfig/no
 npm i dotenv
 
 # Create ESLint configuration (modern, ESM)
-touch eslint.config.js
 cat > eslint.config.js << 'EOF'
 import tsPlugin from "@typescript-eslint/eslint-plugin"
 import tsParser from "@typescript-eslint/parser"
@@ -155,24 +178,23 @@ export default [
         project: ["./tsconfig.json"],
         tsconfigRootDir: __dirname,
         ecmaVersion: 2023,
-        sourceType: 'module',
+        sourceType: "module"
       },
     },
     plugins: { "@typescript-eslint": tsPlugin },
     rules: {
-      '@typescript-eslint/no-misused-promises': 'error',
-      '@typescript-eslint/await-thenable': 'error',
-      '@typescript-eslint/no-floating-promises': 'error',
-      '@typescript-eslint/consistent-type-imports': ['error', { prefer: 'type-imports' }],
-      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' }],
-      'no-mixed-spaces-and-tabs': ['error'],
+      "@typescript-eslint/no-misused-promises": "error",
+      "@typescript-eslint/await-thenable": "error",
+      "@typescript-eslint/no-floating-promises": "error",
+      "@typescript-eslint/consistent-type-imports": ["error", { prefer: "type-imports" }],
+      "@typescript-eslint/no-unused-vars": ["warn", { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" }],
+      "no-mixed-spaces-and-tabs": ["error"]
     },
   },
 ]
 EOF
 
 # Create TypeScript configuration
-touch tsconfig.json
 cat > tsconfig.json << EOF
 {
   "extends": "@tsconfig/node20/tsconfig.json",
@@ -211,27 +233,25 @@ cat > tsconfig.json << EOF
 }
 EOF
 
-# Create initial TypeScript files
-touch types.d.ts
-touch src/bootstrap.ts
+# Initial TypeScript files
 cat > src/bootstrap.ts << EOF
-import 'dotenv/config'
+import "dotenv/config"
 EOF
 
-touch src/index.ts
 cat > src/index.ts << EOF
 import "./bootstrap"
 
 console.log("Yo !")
 EOF
 
-# Create .env file
-touch .env
+touch types.d.ts
+
+# Create .env
 cat > .env << EOF
 SOME_KEY="SOME_VALUE"
 EOF
 
-# Create editorconfig
+# Editorconfig
 cat > .editorconfig << EOF
 root = true
 
@@ -244,7 +264,7 @@ insert_final_newline = true
 trim_trailing_whitespace = true
 EOF
 
-# Create vscode MCP configuration
+# MCP config
 mkdir -p .vscode
 cat > .vscode/mcp.json << EOF
 {
@@ -261,7 +281,52 @@ cat > .vscode/mcp.json << EOF
 }
 EOF
 
-# Add GitHub Actions workflow for lint and typecheck
+# Basic VS Code settings
+cat > .vscode/settings.json << EOF
+{
+  "editor.formatOnSave": true,
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+
+  // Always start Dev Containers in CLEAN mode
+  "dev.containers.defaultContainerMode": "clean",
+
+  // Prevent VS Code from reusing stale containers
+  "dev.containers.defaultReusePolicy": "never"
+}
+EOF
+
+########################################
+# Dev Container — pinned LTS for stability
+# - Per-project node_modules Docker volume (Linux-only, not from macOS host)
+# - Proper permissions for "node" user
+########################################
+mkdir -p .devcontainer
+cat > .devcontainer/devcontainer.json << EOF
+{
+  "name": "TypeScript Dev Container (Node ${DEVCONTAINER_NODE_LTS})",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-${DEVCONTAINER_NODE_LTS}-bookworm",
+  "remoteUser": "node",
+  "postCreateCommand": "mkdir -p node_modules && sudo chown -R node:node node_modules && npm install",
+  "mounts": [
+    "type=volume,source=\${localWorkspaceFolderBasename}-node_modules,target=\${containerWorkspaceFolder}/node_modules"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "editor.formatOnSave": true
+      }
+    }
+  }
+}
+EOF
+
+########################################
+# GitHub Actions CI
+########################################
 mkdir -p .github/workflows
 cat > .github/workflows/ci.yml << EOF
 name: CI
@@ -276,7 +341,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '${NODE_MAJOR}'
       - name: Install dependencies
         run: npm ci
       - name: Lint
@@ -284,10 +349,12 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
       - name: Build
-        run: npm run build-file ./src/index.ts
+        run: npm run build-file
 EOF
 
-# Create GitHub instructions for coding agents
+########################################
+# GitHub Agent Instructions
+########################################
 mkdir -p .github/instructions
 cat > .github/instructions/high-quality.instructions.md << EOF
 ---
@@ -305,13 +372,15 @@ EOF
 # Sort package.json
 npx -y sort-package-json
 
-# Run the build script once to init
-npm run build-file ./src/index.ts
+# Build once to init dist/
+npm run build-file
 
-# Initialize Git repository
-git init
+# Git init
+if [ ! -d ".git" ]; then
+	git init
+fi
 
-# Open the project in Visual Studio Code if `code` is available
+# Open VS Code (best-effort, don't fail script if it doesn't exist)
 if command -v code >/dev/null 2>&1; then
-  code .
+	code . || true
 fi
