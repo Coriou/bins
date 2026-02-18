@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SSH_HOST="${OPENCLAW_SSH_HOST:-openclaw}"
+
+# Find the workspace-git container
+GITC="$(ssh "$SSH_HOST" \
+  'docker ps --filter "label=com.docker.compose.service=workspace-git" --format "{{.Names}}" | head -n 1')"
+
+[[ -n "${GITC:-}" ]] || { echo "No workspace-git container found on $SSH_HOST"; exit 1; }
+
+# If you pass args, run them as a command inside the container (non-interactive)
+if [[ $# -gt 0 ]]; then
+  # Preserve args safely
+  ARGS="$(printf '%q ' "$@")"
+  exec ssh "$SSH_HOST" "docker exec $GITC sh -lc 'cd /data/workspace && $ARGS'"
+fi
+
+# Otherwise open an interactive shell
+exec ssh -t "$SSH_HOST" \
+  "docker exec -it $GITC sh -lc 'cd /data/workspace && (command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l)'"

@@ -8,8 +8,24 @@ GITC="$(ssh "$SSH_HOST" \
 
 [[ -n "${GITC:-}" ]] || { echo "No workspace-git container found on $SSH_HOST"; exit 1; }
 
-PULL_CMD='cd /data/workspace && \
-GIT_SSH_COMMAND="ssh -i /ssh/id_ed25519 -o UserKnownHostsFile=/ssh/known_hosts -o IdentitiesOnly=yes" \
-git pull --rebase'
+SSH_CMD='ssh -i /ssh/id_ed25519 -o UserKnownHostsFile=/ssh/known_hosts -o IdentitiesOnly=yes'
 
-exec ssh -t "$SSH_HOST" "docker exec -it '$GITC' sh -lc '$PULL_CMD'"
+PULL_CMD='
+cd /data/workspace
+git status -sb
+STASHED=0
+if ! git diff --quiet || ! git diff --cached --quiet; then
+  git stash push -u -m "clawpull auto-stash" >/dev/null
+  STASHED=1
+fi
+
+GIT_SSH_COMMAND="'"$SSH_CMD"'" git pull --rebase
+
+if [ "$STASHED" -eq 1 ]; then
+  git stash pop || true
+fi
+
+git log -1 --oneline
+'
+
+exec ssh "$SSH_HOST" "docker exec $GITC sh -lc '$PULL_CMD'"

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SSH_HOST="${OPENCLAW_SSH_HOST:-openclaw}"
+MSG="${1:-chore: sync workspace from VPS}"
+REMOTE="${OPENCLAW_GIT_REMOTE:-origin}"
+
+GITC="$(ssh "$SSH_HOST" \
+  'docker ps --filter "label=com.docker.compose.service=workspace-git" --format "{{.Names}}" | head -n 1')"
+
+[[ -n "${GITC:-}" ]] || { echo "No workspace-git container found on $SSH_HOST"; exit 1; }
+
+# Use the mounted key deterministically
+SSH_CMD='ssh -i /ssh/id_ed25519 -o UserKnownHostsFile=/ssh/known_hosts -o IdentitiesOnly=yes'
+
+CMD=$(cat <<'SH'
+cd /data/workspace
+
+# Ensure repo-local identity exists (no global config in container)
+git config user.name  >/dev/null 2>&1 || git config user.name  "OpenClaw Bot"
+git config user.email >/dev/null 2>&1 || git config user.email "openclaw-bot@local"
+
+# Show status (helpful for logs)
+git status -sb
+
+# Stage everything except ignored files
+git add -A
+
+# Only commit if there is something staged
+if git diff --cached --quiet; then
+  echo "No changes to commit."
+else
+  git commit -m "__MSG__"
+fi
+
+# Push current branch to remote
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+GIT_SSH_COMMAND="__SSH_CMD__" git push "__REMOTE__" "$BRANCH"
+SH
+)
+
+# Inject variables safely
+CMD="${CMD/__MSG__/${MSG//\'/\'\\\'\'}}"
+CMD="${CMD/__SSH_CMD__/${SSH_CMD}}"
+CMD="${CMD/__REMOTE__/${REMOTE}}"
+
+exec ssh "$SSH_HOST" "docker exec $GITC sh -lc '$CMD'"
