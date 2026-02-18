@@ -4,11 +4,9 @@ set -euo pipefail
 
 SSH_HOST="${OPENCLAW_SSH_HOST:-openclaw}"
 
-# Try the most reliable way first: find compose service label
 CONTAINER="$(ssh "$SSH_HOST" \
   'docker ps --filter "label=com.docker.compose.service=openclaw" --format "{{.Names}}" | head -n 1')"
 
-# Fallback: name match (works if labels differ)
 if [[ -z "${CONTAINER:-}" ]]; then
   CONTAINER="$(ssh "$SSH_HOST" \
     'docker ps --format "{{.Names}}" | grep -E "openclaw-.*openclaw" | head -n 1' || true)"
@@ -20,4 +18,7 @@ if [[ -z "${CONTAINER:-}" ]]; then
   exit 1
 fi
 
-exec ssh -t "$SSH_HOST" "docker exec -it '$CONTAINER' openclaw $*"
+# Preserve args safely across SSH → docker exec
+ARGS="$(printf '%q ' "$@")"
+
+exec ssh -t "$SSH_HOST" "docker exec -e HOME=/data -it '$CONTAINER' openclaw $ARGS"

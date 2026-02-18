@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# clawlogs: human-first streaming logs from the OpenClaw container over SSH.
+#
+# Dependencies (local): jq
+# Optional (local): grep
+#
+# Usage:
+#   clawlogs                         # human mode (default), tails /data/.openclaw/logs/*
+#   clawlogs /data/.openclaw/logs/*   # custom glob inside container
+#   clawlogs -m json                  # compact full JSON (1 line per event)
+#   clawlogs -m raw                   # no parsing
+#   clawlogs -g 'error|warn'          # grep filter (line-buffered)
+#   clawlogs -n 500                   # number of initial lines
+#
+# Env:
+#   OPENCLAW_SSH_HOST=openclaw
+#   OPENCLAW_LOG_MODE=human|json|raw
+#   OPENCLAW_LOG_LINES=200
+#   NO_COLOR=1
+
+SSH_HOST="${OPENCLAW_SSH_HOST:-openclaw}"
+MODE="${OPENCLAW_LOG_MODE:-human}"   # human | json | raw
+LINES="${OPENCLAW_LOG_LINES:-200}"
+GREP_PATTERN=""
+NO_COLOR_FLAG=""
+
+usage() {
+  cat <<'EOF'
+clawlogs - human-first OpenClaw log tailer
+
+Options:
+  -h, --host HOST       SSH host (default: $OPENCLAW_SSH_HOST or "openclaw")
+  -n, --lines N         Initial lines to show (default: $OPENCLAW_LOG_LINES or 200)
+  -m, --mode MODE       human|json|raw (default: human)
+  -g, --grep REGEX      Filter lines (grep -E, line-buffered)
+      --no-color        Disable ANSI colors
+  --                    End of options; next arg is LOG_GLOB
+
+Args:
+  LOG_GLOB              Glob inside container (default: /data/.openclaw/logs/*)
+
+Examples:
+  clawlogs
+  clawlogs -m json
+  clawlogs -g 'error|warn'
+  clawlogs -n 500 /data/.openclaw/logs/openclaw*.log
+EOF
+}
+
+# --- args ---
+LOG_GLOB="/data/.openclaw/logs/*"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--host) SSH_HOST="$2"; shift 2 ;;
+    -n|--lines) LINES="$2"; shift 2 ;;
+    -m|--mode) MODE="$2"; shift 2 ;;
+    -g|--grep) GREP_PATTERN="$2"; shift 2 ;;
+    --no-color) NO_COLOR_FLAG="1"; shift ;;
+    --) shift; LOG_GLOB="${1:-$LOG_GLOB}"; shift || true ;;
+    -\?|--help) usage; exit 0 ;;
+    *) LOG_GLOB="$1"; shift ;;
+  esac
+done
+
+case "$MODE" in
+  human|json|raw) ;;
+  *) echo "Invalid mode: $MODE (expected human|json|raw)" >&2; exit 2 ;;
+esac
+
+if [[ "$MODE" != "raw" ]]; then
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "jq is required for mode=$MODE. Install it (brew/apt) or use -m raw." >&2
+    exit 3
+  fi
+fi
+
+# Color only if stdout is a TTY and NO_COLOR is not set.
+COLOR="false"
+if [[ -t 1 && -z "${NO_COLOR:-}" && -z "${NO_COLOR_FLAG:-}" ]]; then
+  COLOR="true"
+fi
+
+# --- find container on remote ---
+CONTAINER="$(ssh -o LogLevel=ERROR "$SSH_HOST" \
+  'docker ps --filter "label=com.docker.compose.service=openclaw" --format "{{.Names}}" | head -n 1' \
+  || true)"
+
+if [[ -z "${CONTAINER:-}" ]]; then
+  CONTAINER="$(ssh -o LogLevel=ERROR "$SSH_HOST" \
+    'docker ps --format "{{.Names}}" | grep -E "openclaw-.*openclaw" | head -n 1' \
+    || true)"
+fi
+
+if [[ -z "${CONTAINER:-}" ]]; then
+  echo "Could not find the OpenClaw container on $SSH_HOST" >&2
+  ssh -o LogLevel=ERROR "$SSH_HOST" 'docker ps' >&2 || true
+  exit 1
+fi
+
+# --- remote stream: prefer persistent logs; fallback to docker logs ---
+remote_stream() {
+  # Use bash -s with args to avoid quoting/globbing footguns.
+  ssh -o LogLevel=ERROR "$SSH_HOST" bash -s -- "$CONTAINER" "$LINES" "$LOG_GLOB" <<'REMOTE'
+set -euo pipefail
+CONTAINER="$1"
+LINES="$2"
+LOG_GLOB="$3"
+
+# Check inside the container whether persistent log dir exists and has entries.
+if docker exec -i "$CONTAINER" sh -lc 'test -d /data/.openclaw/logs && ls -1 /data/.openclaw/logs >/dev/null 2>&1'; then
+  echo "Tailing: $LOG_GLOB" >&2
+  # Expand glob inside the container shell, not on the host.
+  docker exec -i "$CONTAINER" sh -lc "tail -n \"$LINES\" -F -- $LOG_GLOB"
+else
+  echo "No files in /data/.openclaw/logs; falling back to docker logs" >&2
+  docker logs -n "$LINES" -f "$CONTAINER"
+fi
+REMOTE
+}
+
+# --- local formatting ---
+apply_grep() {
+  if [[ -n "${GREP_PATTERN:-}" ]]; then
+    # Keep it streaming (no buffering).
+    grep --line-buffered -E "$GREP_PATTERN" || true
+  else
+    cat
+  fi
+}
+
+format_raw() {
+  cat
+}
+
+format_json_compact() {
+  # 1 line in => 1 line out. JSON lines compacted + colored; non-JSON passthrough.
+  jq -Rr --unbuffered -c -C 'fromjson? // .'
+}
+
+format_human() {
+  # Human-first: timestamp level source event msg + a short list of useful fields.
+  jq -Rr --unbuffered --argjson color "$COLOR" '
+    def esc($c): if $color then "\u001b[" + $c + "m" else "" end;
+    def reset: esc("0");
+    def faint: esc("2");
+    def red: esc("31");
+    def green: esc("32");
+    def yellow: esc("33");
+    def blue: esc("34");
+    def magenta: esc("35");
+    def cyan: esc("36");
+
+    def clean: tostring | gsub("[\r\n\t]+";" ") | gsub(" +";" ");
+    def trunc($n): clean | if length > $n then .[0:$n] + "…" else . end;
+
+    def pick($o; $keys):
+      reduce $keys[] as $k (null;
+        if . != null then .
+        else ($o[$k]? // null)
+        end
+      );
+
+    def lvl_norm: (ascii_downcase);
+    def lvl_color($lvl):
+      ($lvl|lvl_norm) as $l
+      | if $l == "error" or $l == "fatal" then red
+        elif $l == "warn" or $l == "warning" then yellow
+        elif $l == "info" then green
+        elif $l == "debug" or $l == "trace" then faint
+        else blue
+        end;
+
+    def short_hash: tostring | if length > 12 then .[0:12] + "…" else . end;
+
+    def pair($k; $v):
+      if $v == null then empty
+      else "\($k)=\(($v|clean|trunc(140)))"
+      end;
+
+    def bytes_pair($o):
+      if ($o.previousBytes? != null and $o.nextBytes? != null)
+      then "bytes=\($o.previousBytes)->\($o.nextBytes)"
+      else empty end;
+
+    def hashes_pair($o):
+      if ($o.previousHash? != null and $o.nextHash? != null)
+      then "hash=\(($o.previousHash|short_hash))->\(($o.nextHash|short_hash))"
+      else empty end;
+
+    def counts_pair($k; $arr):
+      if ($arr|type) == "array" then "\($k)=\($arr|length)"
+      else empty end;
+
+    . as $line
+    | ($line | fromjson?) as $o
+    | if $o == null then
+        (faint + ($line|clean) + reset)
+      else
+        (pick($o; ["ts","time","timestamp","@timestamp","@ts"]) // "") as $ts
+        | (pick($o; ["level","lvl","severity"]) // "") as $lvl
+        | (pick($o; ["source","logger","component","module"]) // "") as $src
+        | (pick($o; ["event","name","action"]) // "") as $ev
+        | (pick($o; ["msg","message"]) // "") as $msg
+        | (pick($o; ["configPath","path","file"]) // null) as $path
+
+        | [
+            ($ts | tostring),
+            (if ($lvl|length) > 0 then (lvl_color($lvl) + ($lvl|clean) + reset) else "" end),
+            (if ($src|length) > 0 then (cyan + ($src|clean) + reset) else "" end),
+            (if ($ev|length) > 0 then (magenta + ($ev|clean) + reset) else "" end),
+            (if ($msg|length) > 0 then ($msg|trunc(220)) else "" end)
+          ]
+          | map(select(length > 0))
+          | join(" ")
+          as $head
+
+        | [
+            (if $path != null then pair("path"; $path) else empty end),
+            (pair("result"; ($o.result?))),
+            (bytes_pair($o)),
+            (if ($o.changedPathCount? != null) then pair("changed"; $o.changedPathCount) else empty end),
+            (counts_pair("argv"; ($o.argv?))),
+            (counts_pair("execArgv"; ($o.execArgv?))),
+            (pair("pid"; ($o.pid?))),
+            (pair("ppid"; ($o.ppid?))),
+            (hashes_pair($o)),
+            (pair("status"; ($o.status? // $o.code?))),
+            (pair("ms"; ($o.durationMs? // $o.latencyMs? // $o.ms?)))
+          ]
+          | map(select(. != "")) | join(" ")
+          as $tail
+
+        | if ($tail|length) > 0 then ($head + "  " + faint + $tail + reset) else $head end
+      end
+  '
+}
+
+# --- run ---
+remote_stream \
+| tr -d '\r' \
+| apply_grep \
+| case "$MODE" in
+    raw)  format_raw ;;
+    json) format_json_compact ;;
+    human) format_human ;;
+  esac

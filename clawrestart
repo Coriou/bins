@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SSH_HOST="${OPENCLAW_SSH_HOST:-openclaw}"
+
+CONTAINER="$(ssh "$SSH_HOST" \
+  'docker ps --filter "label=com.docker.compose.service=openclaw" --format "{{.Names}}" | head -n 1')"
+
+[[ -n "${CONTAINER:-}" ]] || { echo "No OpenClaw container found"; exit 1; }
+
+ssh -t "$SSH_HOST" "docker restart '$CONTAINER' && docker logs -n 80 '$CONTAINER'"

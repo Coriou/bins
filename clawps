@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SSH_HOST="${OPENCLAW_SSH_HOST:-openclaw}"
+ssh "$SSH_HOST" 'docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | sed -n "1,200p"'

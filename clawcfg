@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SSH_HOST="${OPENCLAW_SSH_HOST:-openclaw}"
+
+CONTAINER="$(ssh "$SSH_HOST" \
+  'docker ps --filter "label=com.docker.compose.service=openclaw" --format "{{.Names}}" | head -n 1')"
+
+if [[ -z "${CONTAINER:-}" ]]; then
+  CONTAINER="$(ssh "$SSH_HOST" \
+    'docker ps --format "{{.Names}}" | grep -E "openclaw-.*openclaw" | head -n 1' || true)"
+fi
+
+if [[ -z "${CONTAINER:-}" ]]; then
+  echo "Could not find the OpenClaw container on $SSH_HOST"
+  ssh "$SSH_HOST" 'docker ps'
+  exit 1
+fi
+
+exec ssh -t "$SSH_HOST" "docker exec -it '$CONTAINER' sh -lc '
+  set -e
+
+  echo \"== OpenClaw container ==\"
+  echo \"container: $CONTAINER\"
+  echo
+
+  echo \"== Persistence paths ==\"
+  echo \"/data: \$(df -h /data | tail -n 1)\"
+  echo
+
+  echo \"-- /data/.openclaw --\"
+  ls -la /data/.openclaw | sed -n \"1,20p\"
+  echo
+
+  echo \"-- config file --\"
+  if [ -f /data/.openclaw/openclaw.json ]; then
+    ls -la /data/.openclaw/openclaw.json
+  else
+    echo \"Missing: /data/.openclaw/openclaw.json\"
+  fi
+  echo
+
+  echo \"-- workspace wiring --\"
+  if [ -L /data/.openclaw/workspace ]; then
+    echo -n \"symlink: /data/.openclaw/workspace -> \"
+    readlink /data/.openclaw/workspace
+  else
+    echo \"Not a symlink: /data/.openclaw/workspace\"
+  fi
+  echo
+
+  echo \"-- workspace contents (top-level) --\"
+  ls -la /data/workspace | sed -n \"1,30p\"
+  echo
+
+  echo \"== OpenClaw CLI checks ==\"
+  openclaw --version || true
+  openclaw doctor || true
+'"
