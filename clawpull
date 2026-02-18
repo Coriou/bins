@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SSH_HOST="${OPENCLAW_SSH_HOST:-openclaw}"
+
+GITC="$(ssh "$SSH_HOST" \
+  'docker ps --filter "label=com.docker.compose.service=workspace-git" --format "{{.Names}}" | head -n 1')"
+
+[[ -n "${GITC:-}" ]] || { echo "No workspace-git container found on $SSH_HOST"; exit 1; }
+
+PULL_CMD='cd /data/workspace && \
+GIT_SSH_COMMAND="ssh -i /ssh/id_ed25519 -o UserKnownHostsFile=/ssh/known_hosts -o IdentitiesOnly=yes" \
+git pull --rebase'
+
+exec ssh -t "$SSH_HOST" "docker exec -it '$GITC' sh -lc '$PULL_CMD'"
