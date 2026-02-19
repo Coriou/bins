@@ -1,0 +1,514 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SSH_HOST="${OPENCLAW_SSH_HOST:-openclaw}"
+SSH_OPTS="${OPENCLAW_SSH_OPTS:-}"                 # e.g. "-o ControlMaster=auto -o ControlPersist=5m"
+COMPRESSION="${OPENCLAW_COMPRESSION:-auto}"       # auto|zstd|gzip|none
+
+SERVICE_DEFAULT="openclaw"
+SERVICE=""
+DEST="."
+REQ_PATH=""
+NO_SAFETY=0
+SYNC=0
+DEBUG=0
+
+usage() {
+  cat <<'EOF'
+Usage:
+  clawget <path-under-/data> [--to <local_dir>] [--container <service>] [--sync]
+         [--compression auto|zstd|gzip|none] [--no-safety] [--debug]
+
+Examples:
+  clawget workspace/projects/.../runs
+  clawget workspace/projects/.../runs --to ./dl
+  clawget workspace/projects/.../runs --sync
+  clawget workspace/projects/.../runs --sync --compression zstd
+EOF
+}
+
+log() { printf "%s\n" "$*"; }
+dbg() { [[ "$DEBUG" -eq 1 ]] && printf "[debug] %s\n" "$*" >&2 || true; }
+
+# shellcheck disable=SC2086
+ssh_run() { ssh $SSH_OPTS "$SSH_HOST" "$@"; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+human_bytes() {
+  local n="${1:-0}"
+  if have numfmt; then
+    numfmt --to=iec --suffix=B "$n"
+  elif have python3; then
+    python3 - <<PY
+n=int("$n")
+units=["B","KB","MB","GB","TB","PB"]
+i=0
+while n>=1024 and i<len(units)-1:
+  n/=1024.0
+  i+=1
+print(f"{n:.2f} {units[i]}")
+PY
+  else
+    printf "%s B" "$n"
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --to) DEST="${2:-}"; shift 2 ;;
+    --container|--service) SERVICE="${2:-}"; shift 2 ;;
+    --compression) COMPRESSION="${2:-}"; shift 2 ;;
+    --no-safety) NO_SAFETY=1; shift ;;
+    --sync) SYNC=1; shift ;;
+    --debug) DEBUG=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *)
+      if [[ -z "${REQ_PATH}" ]]; then
+        REQ_PATH="$1"; shift
+      else
+        echo "Unexpected arg: $1" >&2
+        usage; exit 1
+      fi
+      ;;
+  esac
+done
+
+[[ -n "${REQ_PATH}" ]] || { echo "Missing <path>." >&2; usage; exit 1; }
+mkdir -p "$DEST"
+
+# Pick service:
+# - snapshot: openclaw
+# - sync: workspace-git (rsync/git/keys/tools)
+if [[ -z "${SERVICE}" ]]; then
+  if [[ "$SYNC" -eq 1 ]]; then
+    SERVICE="workspace-git"
+  else
+    SERVICE="$SERVICE_DEFAULT"
+  fi
+fi
+
+# Normalize path under /data
+PATH_IN="$REQ_PATH"
+if [[ "$PATH_IN" == /data/* ]]; then
+  :
+elif [[ "$PATH_IN" == /* ]]; then
+  if [[ "$NO_SAFETY" -ne 1 ]]; then
+    echo "Refusing absolute path outside /data: $PATH_IN" >&2
+    exit 2
+  fi
+else
+  PATH_IN="/data/${PATH_IN#./}"
+fi
+
+# Safety
+if [[ "$NO_SAFETY" -ne 1 ]]; then
+  [[ "$PATH_IN" == /data/* ]] || { echo "Refusing '$PATH_IN' (not under /data)"; exit 2; }
+  if [[ "$PATH_IN" == *"/../"* || "$PATH_IN" == *"/.." || "$PATH_IN" == "../"* ]]; then
+    echo "Refusing path traversal: $REQ_PATH" >&2
+    exit 2
+  fi
+fi
+
+log "clawget: starting"
+log "  host        : $SSH_HOST"
+log "  service     : $SERVICE"
+log "  remote      : $PATH_IN"
+log "  dest        : $DEST"
+log "  compression : $COMPRESSION"
+log
+
+# Find container (robust + matches your proven script)
+# 1) label=com.docker.compose.service -> Names (best)
+# 2) label -> ID fallback
+FIND_CMD='
+set -eu
+svc="$1"
+
+c="$(docker ps --filter "label=com.docker.compose.service=$svc" --format "{{.Names}}" | head -n 1 || true)"
+if [ -n "$c" ]; then echo "$c"; exit 0; fi
+
+c="$(docker ps --filter "label=com.docker.compose.service=$svc" --format "{{.ID}}" | head -n 1 || true)"
+if [ -n "$c" ]; then echo "$c"; exit 0; fi
+
+exit 1
+'
+
+dbg "ssh $SSH_HOST sh -lc '<find_container>' -- $SERVICE"
+CONTAINER="$(ssh_run "sh -lc $(printf '%q' "$FIND_CMD") -- $(printf '%q' "$SERVICE")" || true)"
+CONTAINER="${CONTAINER//$'\r'/}"
+
+if [[ -z "${CONTAINER:-}" ]]; then
+  echo "Could not find container for service '${SERVICE}' on ${SSH_HOST}" >&2
+  if [[ "$DEBUG" -eq 1 ]]; then
+    echo "[debug] docker ps (compose labels):" >&2
+    ssh_run 'docker ps --format "{{.Names}}  {{.Labels}}" | grep -E "com.docker.compose.service=" || true' >&2
+  fi
+  exit 1
+fi
+
+log "  container   : $CONTAINER"
+log
+
+# Decide compression mode (auto => require tool on both sides)
+choose_compression() {
+  local want="$1"
+
+  case "$want" in
+    none|gzip|zstd) echo "$want"; return 0 ;;
+    auto) ;;
+    *) echo "Invalid --compression: $want (expected auto|zstd|gzip|none)" >&2; exit 1 ;;
+  esac
+
+  # auto:
+  if have zstd && ssh_run "docker exec $CONTAINER sh -lc 'command -v zstd >/dev/null 2>&1'"; then
+    echo "zstd"
+  else
+    echo "gzip"
+  fi
+}
+
+COMP="$(choose_compression "$COMPRESSION")"
+log "  chosen codec: $COMP"
+log
+
+# Ensure local can decode chosen compression
+if [[ "$COMP" == "zstd" ]] && ! have zstd; then
+  echo "Compression is zstd but local 'zstd' is not installed. Install it or use --compression gzip." >&2
+  exit 3
+fi
+
+decompress_cmd() {
+  case "$1" in
+    zstd) echo "zstd -dc --quiet" ;;
+    gzip) echo "gzip -dc" ;;
+    none) echo "cat" ;;
+  esac
+}
+
+pv_cmd() {
+  local total="${1:-0}"
+  if have pv; then
+    echo "pv -pterb -s $total"
+  else
+    echo "cat"
+  fi
+}
+
+# Apply directory mtimes from a manifest file (relpath<TAB>epoch)
+# Non-hacky approach: restore after extraction, deepest-first, using python3 if available.
+apply_dir_mtimes() {
+  local dir_manifest="$1"
+  local local_root="$2"
+
+  if [[ ! -s "$dir_manifest" ]]; then
+    dbg "dir manifest empty; skipping dir mtime restore"
+    return 0
+  fi
+
+  if ! have python3; then
+    log "⚠️  Note: python3 not found locally; skipping directory mtime restore (files are still preserved)."
+    return 0
+  fi
+
+  python3 - "$dir_manifest" "$local_root" <<'PY'
+import os, sys
+
+manifest = sys.argv[1]
+root = sys.argv[2]
+
+entries = []
+with open(manifest, "r", encoding="utf-8", errors="replace") as f:
+    for line in f:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        try:
+            rel, mt = line.split("\t", 1)
+            mt = int(float(mt))
+        except Exception:
+            continue
+        # rel can be "." for root
+        entries.append((rel, mt))
+
+# deepest-first (so parent mtimes aren't impacted by later child updates)
+entries.sort(key=lambda x: x[0].count("/"), reverse=True)
+
+def set_mtime(path, ts):
+    try:
+        # prefer not following symlinks
+        os.utime(path, (ts, ts), follow_symlinks=False)
+    except TypeError:
+        # older python: no follow_symlinks arg
+        os.utime(path, (ts, ts))
+    except Exception:
+        pass
+
+for rel, ts in entries:
+    if rel in ("", "."):
+        path = root
+    else:
+        path = os.path.join(root, rel)
+    if os.path.isdir(path):
+        set_mtime(path, ts)
+PY
+}
+
+sync_manifest() {
+  local path_in="$1"
+  local dest="$2"
+  local base local_target
+  base="$(basename "$path_in")"
+  local_target="${dest%/}/${base}"
+  mkdir -p "$local_target"
+
+  log "Sync mode (manifest + selective archive)"
+  log "  local target: $local_target"
+  log
+
+  local manifest dir_manifest to_fetch
+  manifest="$(mktemp)"
+  dir_manifest="$(mktemp)"
+  to_fetch="$(mktemp)"
+
+  log "Phase 1/3: building remote manifests..."
+
+  # File manifest inside container; output: rpath<TAB>size<TAB>mtime
+  local remote_file_manifest='
+set -eu
+P="$1"
+[ -d "$P" ] || { echo "ERR_NOT_DIR" >&2; exit 45; }
+cd "$P"
+find . -type f -print0 | while IFS= read -r -d "" f; do
+  if stat -c "%s %Y" "$f" >/dev/null 2>&1; then
+    set -- $(stat -c "%s %Y" "$f")
+    printf "%s\t%s\t%s\n" "${f#./}" "$1" "$2"
+  elif stat -f "%z %m" "$f" >/dev/null 2>&1; then
+    set -- $(stat -f "%z %m" "$f")
+    printf "%s\t%s\t%s\n" "${f#./}" "$1" "$2"
+  else
+    sz=$(wc -c <"$f" | tr -d " ")
+    printf "%s\t%s\t0\n" "${f#./}" "$sz"
+  fi
+done
+'
+
+  # Directory manifest inside container; output: dpath<TAB>mtime (includes "." root)
+  local remote_dir_manifest='
+set -eu
+P="$1"
+[ -d "$P" ] || { echo "ERR_NOT_DIR" >&2; exit 45; }
+cd "$P"
+find . -type d -print0 | while IFS= read -r -d "" d; do
+  if stat -c "%Y" "$d" >/dev/null 2>&1; then
+    mt=$(stat -c "%Y" "$d")
+  elif stat -f "%m" "$d" >/dev/null 2>&1; then
+    mt=$(stat -f "%m" "$d")
+  else
+    mt=0
+  fi
+  printf "%s\t%s\n" "${d#./}" "$mt"
+done
+'
+
+  if [[ "$DEBUG" -eq 1 ]]; then
+    ssh_run "docker exec $CONTAINER sh -lc $(printf '%q' "$remote_file_manifest") -- $(printf '%q' "$path_in")" >"$manifest"
+    ssh_run "docker exec $CONTAINER sh -lc $(printf '%q' "$remote_dir_manifest") -- $(printf '%q' "$path_in")" >"$dir_manifest"
+  else
+    ssh_run "docker exec $CONTAINER sh -lc $(printf '%q' "$remote_file_manifest") -- $(printf '%q' "$path_in")" >"$manifest" 2>/dev/null
+    ssh_run "docker exec $CONTAINER sh -lc $(printf '%q' "$remote_dir_manifest") -- $(printf '%q' "$path_in")" >"$dir_manifest" 2>/dev/null
+  fi
+
+  local total_files total_dirs
+  total_files="$(wc -l < "$manifest" | tr -d ' ')"
+  total_dirs="$(wc -l < "$dir_manifest" | tr -d ' ')"
+  log "  remote files : $total_files"
+  log "  remote dirs  : $total_dirs"
+  log
+
+  log "Phase 2/3: computing delta (missing/changed files)..."
+
+  while IFS=$'\t' read -r rpath rsize rmt; do
+    local lfile="$local_target/$rpath"
+    if [[ ! -f "$lfile" ]]; then
+      printf "%s\n" "$rpath" >> "$to_fetch"
+      continue
+    fi
+
+    local lsize lmt
+    lsize="$(stat -f '%z' "$lfile" 2>/dev/null || stat -c '%s' "$lfile" 2>/dev/null || echo 0)"
+    lmt="$(stat -f '%m' "$lfile" 2>/dev/null || stat -c '%Y' "$lfile" 2>/dev/null || echo 0)"
+
+    if [[ "$lsize" != "$rsize" || "$lmt" != "$rmt" ]]; then
+      printf "%s\n" "$rpath" >> "$to_fetch"
+    fi
+  done < "$manifest"
+
+  local need
+  need="$(wc -l < "$to_fetch" | tr -d ' ')"
+  if [[ "$need" == "0" ]]; then
+    log "Already in sync ✅"
+    log "Restoring directory mtimes…"
+    apply_dir_mtimes "$dir_manifest" "$local_target"
+    rm -f "$manifest" "$dir_manifest" "$to_fetch"
+    return 0
+  fi
+
+  # Sum raw bytes and estimate uncompressed tar size (for pv after decompression)
+  local raw_bytes tar_bytes
+  raw_bytes="$(awk -F'\t' '
+    NR==FNR { want[$1]=1; next }
+    want[$1] { sum += $2 }
+    END { printf "%.0f\n", sum }
+  ' "$to_fetch" "$manifest")"
+
+  tar_bytes="$(awk -F'\t' '
+    NR==FNR { want[$1]=1; next }
+    want[$1] {
+      s = $2 + 0
+      padded = int((s + 511) / 512) * 512
+      sum += 512 + padded
+    }
+    END { sum += 1024; printf "%.0f\n", sum }
+  ' "$to_fetch" "$manifest")"
+
+  log "  to fetch     : $need"
+  log "  raw bytes    : $(human_bytes "$raw_bytes")"
+  log "  tar bytes est: $(human_bytes "$tar_bytes")"
+  log "  codec        : $COMP"
+  log
+
+  log "Phase 3/3: streaming changed files..."
+
+  local DECOMP PV
+  DECOMP="$(decompress_cmd "$COMP")"
+  PV="$(pv_cmd "$tar_bytes")"
+
+  # Single SSH call: stdin = filelist, stdout = compressed tar stream
+  local remote_stream='
+set -eu
+P="$1"
+CODEC="$2"
+[ -d "$P" ] || { echo "ERR_NOT_DIR" >&2; exit 45; }
+
+LIST="$(mktemp /tmp/clawget.list.XXXXXX)"
+cleanup() { rm -f "$LIST"; }
+trap cleanup EXIT
+
+cat > "$LIST"
+[ -s "$LIST" ] || { echo "ERR_EMPTY_FILELIST" >&2; exit 46; }
+
+cd "$P"
+
+tar_stream() {
+  # Prefer tar -T (handles spaces reliably)
+  if tar -cf - -T "$LIST" >/dev/null 2>&1; then
+    tar -cf - -T "$LIST"
+  else
+    # Fallback: xargs (filenames must not contain newlines)
+    # Busybox xargs may not support -d; if this fails, you want tar -T available.
+    cat "$LIST" | xargs -r -d "\n" tar -cf -
+  fi
+}
+
+case "$CODEC" in
+  zstd)
+    if command -v zstd >/dev/null 2>&1; then
+      tar_stream | zstd -T0 -1 --quiet
+    else
+      tar_stream | gzip -1
+    fi
+    ;;
+  gzip)
+    if command -v pigz >/dev/null 2>&1; then
+      tar_stream | pigz -1
+    else
+      tar_stream | gzip -1
+    fi
+    ;;
+  none)
+    tar_stream
+    ;;
+  *)
+    echo "ERR_BAD_CODEC: $CODEC" >&2
+    exit 47
+    ;;
+esac
+'
+
+  # Extract:
+  # -p keeps permissions closer to remote
+  # --no-same-owner avoids chown attempts on dev machines
+  # mtimes are preserved by tar automatically
+  # shellcheck disable=SC2090
+  ssh_run "docker exec -i $CONTAINER sh -lc $(printf '%q' "$remote_stream") -- $(printf '%q' "$path_in") $(printf '%q' "$COMP")" \
+    < "$to_fetch" \
+    | eval "$DECOMP" \
+    | eval "$PV" \
+    | tar -xpf - --no-same-owner -C "$local_target"
+
+  log
+  log "Restoring directory mtimes…"
+  apply_dir_mtimes "$dir_manifest" "$local_target"
+
+  log
+  log "Sync done ✅  → $local_target"
+  rm -f "$manifest" "$dir_manifest" "$to_fetch"
+}
+
+if [[ "$SYNC" -eq 1 ]]; then
+  sync_manifest "$PATH_IN" "$DEST"
+  exit 0
+fi
+
+# Snapshot mode (copy-all)
+REMOTE_SNAPSHOT='
+set -eu
+P="$1"
+CODEC="$2"
+[ -e "$P" ] || { echo "ERR: path does not exist: $P" >&2; exit 44; }
+DIR="$(dirname "$P")"
+BASE="$(basename "$P")"
+cd "$DIR"
+
+case "$CODEC" in
+  zstd)
+    if command -v zstd >/dev/null 2>&1; then
+      tar -cf - "$BASE" | zstd -T0 -1 --quiet
+    else
+      tar -czf - "$BASE"
+    fi
+    ;;
+  gzip)
+    if command -v pigz >/dev/null 2>&1; then
+      tar -cf - "$BASE" | pigz -1
+    else
+      tar -czf - "$BASE"
+    fi
+    ;;
+  none)
+    tar -cf - "$BASE"
+    ;;
+  *)
+    echo "ERR_BAD_CODEC: $CODEC" >&2
+    exit 47
+    ;;
+esac
+'
+
+DECOMP="$(decompress_cmd "$COMP")"
+PV="$(pv_cmd 0)"
+
+log "Snapshot mode (archive) downloading..."
+[[ "$PV" == "cat" ]] && have pv || log "  tip: install pv for a nicer progress bar"
+log "  codec: $COMP"
+log
+
+# shellcheck disable=SC2090
+ssh_run "docker exec $CONTAINER sh -lc $(printf '%q' "$REMOTE_SNAPSHOT") -- $(printf '%q' "$PATH_IN") $(printf '%q' "$COMP")" \
+  | eval "$DECOMP" \
+  | eval "$PV" \
+  | tar -xpf - --no-same-owner -C "$DEST"
+
+log
+log "Done (snapshot)."
