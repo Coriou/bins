@@ -1,0 +1,50 @@
+#!/bin/bash
+
+# Clean built-in monitor for macOS (no third-party tools)
+# Best effort on Intel Macs where powermetrics SMC temps are unavailable.
+
+INTERVAL=2
+
+while true; do
+  clear
+  printf "╭──────────────────────────────────────────────────────────────╮\n"
+  printf "│ Mac Monitor (built-in only)                                │\n"
+  printf "├──────────────────────────────────────────────────────────────┤\n"
+  printf "│ Time: %-53s │\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+  printf "│ Host: %-53s │\n" "$(scutil --get ComputerName 2>/dev/null || hostname)"
+  printf "╰──────────────────────────────────────────────────────────────╯\n\n"
+
+  echo "▸ SYSTEM LOAD"
+  uptime | sed 's/^/  /'
+  echo
+
+  echo "▸ TOP CPU PROCESSES"
+  ps -Ao pid,pcpu,pmem,comm -r | head -n 8 | awk '
+    BEGIN { printf "  %-8s %-8s %-8s %s\n", "PID", "CPU%", "MEM%", "CMD" }
+    NR>1 { printf "  %-8s %-8s %-8s %s\n", $1, $2, $3, $4 }
+  '
+  echo
+
+  echo "▸ CPU / POWER / THERMAL (powermetrics)"
+  PM_OUT="$(sudo powermetrics -n 1 --samplers cpu_power,thermal 2>/dev/null)"
+
+  # Pull only useful lines (works across macOS versions with slightly different wording)
+  echo "$PM_OUT" | egrep -i \
+    'CPU Power|Package Power|GPU Power|ANE Power|DRAM Power|Frequency|IPC|thermal|pressure|scheduler limit|CPUs active|die temp' \
+    | sed 's/^/  /'
+
+  # Helpful note when no temps are available
+  if ! echo "$PM_OUT" | egrep -qi 'die temp|temperature|Fan:'; then
+    echo "  (No SMC temperature/fan sensors exposed on this model via powermetrics)"
+  fi
+  echo
+
+  echo "▸ MEMORY PRESSURE"
+  memory_pressure 2>/dev/null | head -n 5 | sed 's/^/  /'
+  echo
+
+  echo "▸ DISK I/O (1s sample)"
+  iostat -d -c 2 1 | tail -n +3 | sed 's/^/  /'
+
+  sleep "$INTERVAL"
+done
