@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# passgen — cryptographically secure password generator
+set -euo pipefail
+
+# ── defaults ──────────────────────────────────────────────────────────────────
+LENGTH=32
+COUNT=1
+MODE=alpha          # default | alpha | pin | words
+COPY=true
+DASHES=true
+WORDS=5
+
+# ── character sets ────────────────────────────────────────────────────────────
+# Leading '-' is unambiguously literal in tr; '!@#$%^&*_+=' are individual chars
+CHARS_DEFAULT='-A-Za-z0-9!@#$%^&*_+='
+CHARS_ALPHA='A-Za-z0-9'
+CHARS_PIN='0-9'
+WORDLIST='/usr/share/dict/words'
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+die()   { printf 'passgen: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+Usage: passgen [OPTIONS] [LENGTH]
+
+  passgen               32-char alphanumeric password, copied to clipboard
+  passgen 20            20-char password
+  passgen -s            include symbols (!@#$%^&*_+=)
+  passgen -d            insert dashes at random intervals (human-friendly)
+  passgen -p [N]        numeric PIN  (default: 6 digits)
+  passgen -w [N]        word passphrase (default: 5 words)
+  passgen -n 5          generate 5 passwords
+  passgen --no-copy     don't copy to clipboard
+
+Options:
+  -l N, --length N        password length (default: 32)
+  -n N, --count N         number of passwords (default: 1)
+  -s, --symbols           include symbols in character set
+  -d, --dashes            insert random dashes for readability
+  -p [N], --pin [N]       numeric PIN (default length: 6)
+  -w [N], --words [N]     word passphrase (default: 5 words)
+  -c, --copy              copy first password to clipboard (default: on)
+      --no-copy           disable clipboard copy
+  -h, --help              show this help
+EOF
+  exit 0
+}
+
+# Draw N characters from /dev/urandom, keeping only those in the given tr set.
+# '--' ends option parsing so charsets starting with '-' aren't parsed as flags.
+# '|| :' absorbs the SIGPIPE exit code tr gets when head closes early.
+rand_chars() {
+  LC_ALL=C tr -dc -- "$1" < /dev/urandom | head -c "$2" || :
+}
+
+# Split a password into random-sized chunks joined by dashes.
+# Total length of the result (chars + dashes) equals TARGET exactly.
+# pw must have at least TARGET chars; only as many as needed are consumed.
+# Uses Python's secrets module (CSPRNG) for secure chunk sizing.
+insert_dashes() {
+  python3 - "$1" "$2" <<'PYEOF'
+import sys, secrets
+pw, budget = sys.argv[1], int(sys.argv[2])
+# budget = chars_used + dashes = sum(sizes) + (n_chunks - 1)
+# Each iteration: pick a chunk, deduct (chunk + 1) for the following dash.
+# Last chunk: deduct only chunk (no trailing dash) — handled by the <= 8 guard.
+parts, idx = [], 0
+while budget > 0:
+    if budget <= 8:
+        # Final segment: consume all remaining budget as chars (no trailing dash)
+        parts.append(pw[idx:idx+budget])
+        break
+    # Leave room for at least one more segment (≥3 chars) + its leading dash (1)
+    max_chunk = budget - 4           # budget - 3 - 1
+    chunk = secrets.randbelow(min(6, max_chunk - 2)) + 3  # [3, min(8, max_chunk)]
+    chunk = max(3, min(chunk, max_chunk))
+    parts.append(pw[idx:idx+chunk])
+    idx += chunk
+    budget -= chunk + 1              # deduct chars + the dash that follows
+print('-'.join(parts))
+PYEOF
+}
+
+# Pick N random words from the system wordlist using Python's secrets module
+# (cryptographically secure). Falls back to awk seeded from /dev/urandom.
+rand_words() {
+  local n="$1"
+  [[ -f $WORDLIST ]] || die "wordlist not found: $WORDLIST"
+
+  if command -v python3 &>/dev/null; then
+    python3 - "$n" "$WORDLIST" <<'PYEOF'
+import sys, secrets, re
+n, path = int(sys.argv[1]), sys.argv[2]
+with open(path) as f:
+    words = [w.strip() for w in f if re.match(r'^[a-z]{4,8}$', w.strip())]
+print('-'.join(secrets.choice(words) for _ in range(n)))
+PYEOF
+  else
+    # Fallback: awk PRNG seeded from /dev/urandom (not CSPRNG, but practical)
+    local seed
+    seed=$(LC_ALL=C od -An -N4 -tu4 /dev/urandom | tr -d ' \n')
+    awk -v seed="$seed" -v n="$n" '
+      /^[a-z]{4,8}$/ { w[++t] = $0 }
+      END { srand(seed); for (i=1; i<=n; i++) printf "%s%s", w[int(rand()*t)+1], (i<n?"-":"\n") }
+    ' "$WORDLIST"
+  fi
+}
+
+generate() {
+  local pw
+  case $MODE in
+    # Over-generate raw chars so insert_dashes always has enough to draw from.
+    # Worst-case chunk size is 8, so LENGTH raw chars cover any split of LENGTH total.
+    default) pw=$(rand_chars "$CHARS_DEFAULT" "$LENGTH") ;;
+    alpha)   pw=$(rand_chars "$CHARS_ALPHA"   "$LENGTH") ;;
+    pin)     pw=$(rand_chars "$CHARS_PIN"     "$LENGTH") ;;
+    words)   pw=$(rand_words "$WORDS") ;;
+  esac
+  if $DASHES && [[ $MODE != words && $MODE != pin ]]; then
+    pw=$(insert_dashes "$pw" "$LENGTH")
+  fi
+  printf '%s' "$pw"
+}
+
+# ── argument parsing ──────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -h|--help)               usage ;;
+    -l|--length)             [[ ${2:-} =~ ^[0-9]+$ ]] || die "length must be a number"; LENGTH=$2; shift 2 ;;
+    --length=*)              LENGTH=${1#*=}; shift ;;
+    -n|--count)              [[ ${2:-} =~ ^[0-9]+$ ]] || die "count must be a number"; COUNT=$2; shift 2 ;;
+    --count=*)               COUNT=${1#*=}; shift ;;
+    -s|--symbols)            MODE=default; shift ;;
+    -d|--dashes)             DASHES=true; shift ;;
+    -p|--pin)                MODE=pin; LENGTH=6; [[ ${2:-} =~ ^[0-9]+$ ]] && { LENGTH=$2; shift; }; shift ;;
+    -w|--words|--passphrase) MODE=words; [[ ${2:-} =~ ^[0-9]+$ ]] && { WORDS=$2; shift; }; shift ;;
+    -c|--copy)               COPY=true; shift ;;
+    --no-copy)               COPY=false; shift ;;
+    [0-9]*)                  LENGTH=$1; shift ;;
+    *)                       die "unknown option: $1" ;;
+  esac
+done
+
+# ── generate ──────────────────────────────────────────────────────────────────
+first=
+for ((i=1; i<=COUNT; i++)); do
+  pw=$(generate)
+  printf '%s\n' "$pw"
+  [[ -z $first ]] && first=$pw
+done
+
+if $COPY; then
+  command -v pbcopy &>/dev/null || die "pbcopy not available"
+  printf '%s' "$first" | pbcopy
+  printf '(copied to clipboard)\n' >&2
+fi
