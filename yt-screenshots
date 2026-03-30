@@ -1,0 +1,341 @@
+#!/bin/bash
+
+# yt-screenshots — extract sharp screenshots from a video
+#
+# Downloads via yt-dlp if given a URL, then picks the sharpest frame
+# around each timecode using Laplacian variance. Without timecodes,
+# auto-detects good moments via scene-change detection.
+
+set -euo pipefail
+export LC_NUMERIC=C
+
+# ── Colors (tty-aware) ──────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m' DIM=$'\033[2m'
+  GREEN=$'\033[32m' YELLOW=$'\033[33m' RED=$'\033[31m'
+  RESET=$'\033[0m'
+else
+  BOLD="" DIM="" GREEN="" YELLOW="" RED="" RESET=""
+fi
+
+# ── Temp dir (single, cleaned on any exit) ──────────────────────
+
+WORKDIR=$(mktemp -d)
+trap 'rm -rf "$WORKDIR"' EXIT
+
+# ── Defaults ─────────────────────────────────────────────────────
+
+MAX_SCREENSHOTS=10
+MIN_GAP=5
+
+# ── Usage ────────────────────────────────────────────────────────
+
+usage() {
+  cat <<EOF
+
+  ${BOLD}yt-screenshots${RESET} — extract sharp screenshots from a video
+
+  ${BOLD}USAGE${RESET}
+    yt-screenshots [options] <url-or-video> [timecode ...]
+
+  ${BOLD}TIMECODES${RESET}
+    ${DIM}1:14${RESET}      → 1m14s       ${DIM}(colon mm:ss)${RESET}
+    ${DIM}0.42${RESET}      → 0m42s       ${DIM}(dot shorthand m.ss)${RESET}
+    ${DIM}42${RESET}        → 42s         ${DIM}(raw seconds)${RESET}
+    ${DIM}1:02:30${RESET}   → 1h02m30s    ${DIM}(h:mm:ss)${RESET}
+
+    Omit timecodes to auto-detect via scene changes.
+
+  ${BOLD}OPTIONS${RESET}
+    -n <count>    Max screenshots in auto mode  ${DIM}(default: 10)${RESET}
+    -g <seconds>  Min gap between screenshots   ${DIM}(default: 5)${RESET}
+    -h            Show this help
+
+  ${BOLD}EXAMPLES${RESET}
+    yt-screenshots https://youtube.com/watch?v=abc 0.42 1:14
+    yt-screenshots -n 15 -g 3 video.mp4
+    yt-screenshots video.mp4
+
+EOF
+  exit 0
+}
+
+# ── Parse options ────────────────────────────────────────────────
+
+while getopts "n:g:h" opt; do
+  case $opt in
+    n) MAX_SCREENSHOTS="$OPTARG" ;;
+    g) MIN_GAP="$OPTARG" ;;
+    h) usage ;;
+    *) usage ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+[ $# -lt 1 ] && usage
+
+# ── Dependency check ─────────────────────────────────────────────
+
+dep_ok=true
+for cmd in ffmpeg ffprobe python3; do
+  command -v "$cmd" >/dev/null || { echo "  ${RED}missing:${RESET} $cmd"; dep_ok=false; }
+done
+$dep_ok || { echo "  ${DIM}brew install ffmpeg python3${RESET}"; exit 1; }
+
+python3 -c "import cv2" 2>/dev/null || {
+  echo "  ${RED}missing:${RESET} python opencv"
+  echo "  ${DIM}pip3 install opencv-python-headless${RESET}"
+  exit 1
+}
+
+# ── Helpers ──────────────────────────────────────────────────────
+
+parse_seconds() {
+  local tc="$1" h=0 m=0 s=0
+  if [[ "$tc" == *":"*":"* ]]; then
+    IFS=: read -r h m s <<< "$tc"
+  elif [[ "$tc" == *":"* ]]; then
+    IFS=: read -r m s <<< "$tc"
+  elif [[ "$tc" == *"."* ]]; then
+    IFS=. read -r m s <<< "$tc"
+  else
+    s="$tc"
+  fi
+  printf "%.1f" "$(echo "$h * 3600 + $m * 60 + $s" | bc -l)"
+}
+
+format_tc() {
+  local total=${1%.*}
+  if [ "$total" -ge 3600 ]; then
+    printf "%d:%02d:%02d" "$((total / 3600))" "$(((total % 3600) / 60))" "$((total % 60))"
+  else
+    printf "%d:%02d" "$((total / 60))" "$((total % 60))"
+  fi
+}
+
+pick_sharpest() {
+  python3 -c "
+import cv2, glob, os, sys
+frames = sorted(glob.glob(os.path.join(sys.argv[1], 'frame_*.jpg')))
+best_score, best_frame = -1, None
+for f in frames:
+    img = cv2.imread(f, cv2.IMREAD_GRAYSCALE)
+    if img is None: continue
+    score = cv2.Laplacian(img, cv2.CV_64F).var()
+    if score > best_score:
+        best_score, best_frame = score, f
+if best_frame:
+    print(f'{best_frame}|{best_score:.1f}')
+else:
+    print('NONE')
+" "$1"
+}
+
+detect_scenes() {
+  python3 -c "
+import subprocess, sys, json, re
+
+video, max_n, min_gap = sys.argv[1], int(sys.argv[2]), float(sys.argv[3])
+
+# Duration
+probe = subprocess.run(
+    ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+     '-of', 'json', video],
+    capture_output=True, text=True)
+if probe.returncode != 0:
+    print('error: could not read video', file=sys.stderr)
+    sys.exit(1)
+duration = float(json.loads(probe.stdout)['format']['duration'])
+
+# Scene changes
+result = subprocess.run(
+    ['ffmpeg', '-i', video,
+     '-vf', r'select=gt(scene\,0.3),showinfo',
+     '-fps_mode', 'vfr', '-f', 'null', '-'],
+    capture_output=True, text=True)
+
+cuts = []
+for line in result.stderr.split('\n'):
+    m = re.search(r'pts_time:([0-9.]+)', line)
+    if m:
+        t = float(m.group(1))
+        if 1.0 < t < duration - 2.0:
+            cuts.append(t)
+
+if cuts:
+    # Offset into each scene, clamped to not overshoot next cut
+    times = []
+    for i, t in enumerate(cuts):
+        next_t = cuts[i + 1] if i + 1 < len(cuts) else duration
+        offset = min(0.5, (next_t - t) * 0.4)
+        times.append(t + offset)
+else:
+    # Fallback: evenly spaced
+    step = duration / (max_n + 1)
+    times = [step * (i + 1) for i in range(max_n)]
+
+# Enforce minimum gap
+selected = []
+for t in times:
+    if not selected or (t - selected[-1]) >= min_gap:
+        selected.append(t)
+
+# Thin to max count
+if len(selected) > max_n:
+    step = len(selected) / max_n
+    selected = [selected[int(i * step)] for i in range(max_n)]
+
+print(f'{len(cuts)} {len(selected)}')
+for t in selected:
+    print(f'{t:.1f}')
+" "$1" "$2" "$3"
+}
+
+extract_frame() {
+  local video="$1" secs="$2" outdir="$3" clean_name="$4"
+
+  local total=${secs%.*}
+  local mm=$((total / 60)) ss=$((total % 60))
+  local label=$(printf "%02d_%02d" "$mm" "$ss")
+  local tc
+  tc=$(format_tc "$secs")
+
+  # Deduplicate label if file already exists
+  local out="${outdir}/${clean_name}_${label}.jpg"
+  if [ -f "$out" ]; then
+    local i=2
+    while [ -f "${outdir}/${clean_name}_${label}_${i}.jpg" ]; do ((i++)); done
+    out="${outdir}/${clean_name}_${label}_${i}.jpg"
+  fi
+
+  local tmpdir="${WORKDIR}/tc_${label}_$$"
+  mkdir -p "$tmpdir"
+
+  local start
+  start=$(printf "%.1f" "$(echo "$secs - 0.3" | bc -l)")
+  if (( $(echo "$start < 0" | bc -l) )); then start="0.0"; fi
+
+  printf "  ${DIM}%7s${RESET}  " "$tc"
+
+  ffmpeg -y -ss "$start" -i "$video" -t 0.6 \
+    -vf "fps=10" -q:v 2 \
+    "${tmpdir}/frame_%03d.jpg" 2>/dev/null
+
+  local count
+  count=$(find "$tmpdir" -name "frame_*.jpg" | wc -l | tr -d ' ')
+  if [ "$count" -eq 0 ]; then
+    printf "${YELLOW}no frames${RESET}\n"
+    return
+  fi
+
+  local result
+  result=$(pick_sharpest "$tmpdir")
+  if [ "$result" = "NONE" ]; then
+    printf "${YELLOW}scoring failed${RESET}\n"
+    return
+  fi
+
+  local best_file="${result%|*}"
+  local best_score="${result#*|}"
+  cp "$best_file" "$out"
+  printf "sharpness ${BOLD}%6s${RESET}  ${GREEN}✓${RESET}  ${DIM}%s${RESET}\n" "$best_score" "$(basename "$out")"
+}
+
+# ── Main ─────────────────────────────────────────────────────────
+
+INPUT="$1"
+shift
+
+echo ""
+
+# ── Download if URL ──────────────────────────────────────────────
+
+if [[ "$INPUT" == http* ]]; then
+  command -v yt-dlp >/dev/null || {
+    echo "  ${RED}missing:${RESET} yt-dlp"
+    echo "  ${DIM}brew install yt-dlp${RESET}"
+    exit 1
+  }
+
+  echo "  ${BOLD}⬇ Downloading${RESET}"
+  echo ""
+
+  VIDEO=$(yt-dlp \
+    -f "bestvideo+bestaudio/best" --merge-output-format mkv \
+    --no-playlist --print filename \
+    -o "/tmp/%(title)s [%(id)s].%(ext)s" \
+    --no-simulate "$INPUT" | tail -1)
+
+  echo ""
+
+  if [ -z "$VIDEO" ] || [ ! -f "$VIDEO" ]; then
+    echo "  ${RED}download failed${RESET}"
+    exit 1
+  fi
+
+  echo "  ${DIM}${VIDEO}${RESET}"
+else
+  VIDEO="$INPUT"
+  if [ ! -f "$VIDEO" ]; then
+    echo "  ${RED}not found:${RESET} $VIDEO"
+    exit 1
+  fi
+fi
+
+# ── Output dir ───────────────────────────────────────────────────
+
+VIDEO_DIR=$(dirname "$VIDEO")
+BASENAME=$(basename "${VIDEO%.*}")
+CLEAN_NAME=$(echo "$BASENAME" | sed 's/[^a-zA-Z0-9_-]/_/g; s/__*/_/g; s/^_//; s/_$//')
+OUTDIR="${VIDEO_DIR}/screenshots_${CLEAN_NAME}"
+mkdir -p "$OUTDIR"
+
+# ── Detect or extract ────────────────────────────────────────────
+
+if [ $# -eq 0 ]; then
+  echo ""
+  echo "  ${BOLD}🔍 Detecting scenes${RESET}"
+
+  SCENE_DATA=$(detect_scenes "$VIDEO" "$MAX_SCREENSHOTS" "$MIN_GAP")
+  HEADER=$(echo "$SCENE_DATA" | head -1)
+  TOTAL_CUTS=${HEADER% *}
+  SELECTED=${HEADER#* }
+  SECONDS_LIST=$(echo "$SCENE_DATA" | tail -n +2)
+
+  if [ -z "$SECONDS_LIST" ]; then
+    echo "  ${YELLOW}no scenes found${RESET}"
+    echo ""
+    exit 0
+  fi
+
+  echo "  ${DIM}${TOTAL_CUTS} cuts → ${SELECTED} selected (gap ≥${MIN_GAP}s)${RESET}"
+  echo ""
+  echo "  ${BOLD}📸 Extracting${RESET}"
+  echo ""
+
+  while IFS= read -r secs; do
+    [ -n "$secs" ] && extract_frame "$VIDEO" "$secs" "$OUTDIR" "$CLEAN_NAME"
+  done <<< "$SECONDS_LIST"
+else
+  echo ""
+  echo "  ${BOLD}📸 Extracting${RESET}"
+  echo ""
+
+  for TC in "$@"; do
+    SECS=$(parse_seconds "$TC")
+    extract_frame "$VIDEO" "$SECS" "$OUTDIR" "$CLEAN_NAME"
+  done
+fi
+
+# ── Summary ──────────────────────────────────────────────────────
+
+FINAL=$(find "$OUTDIR" -maxdepth 1 -name "*.jpg" | wc -l | tr -d ' ')
+
+echo ""
+if [ "$FINAL" -gt 0 ]; then
+  echo "  ${GREEN}✓ ${FINAL} screenshots${RESET} → ${DIM}${OUTDIR}${RESET}"
+else
+  echo "  ${YELLOW}no screenshots extracted${RESET}"
+fi
+echo ""
